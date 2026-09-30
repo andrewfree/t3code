@@ -109,6 +109,8 @@ async function createOrchestrationSystem(
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     readThread: (threadId: ThreadId) =>
       runtime.runPromise(snapshotQuery.getThreadDetailById(threadId)),
+    readThreadShell: (threadId: ThreadId) =>
+      runtime.runPromise(snapshotQuery.getThreadShellById(threadId)),
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
     dispose: () => runtime.dispose(),
   };
@@ -331,6 +333,154 @@ describe("OrchestrationEngine", () => {
       }
     },
   );
+
+  it("keeps open requests blocking snooze and settle after a restart", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-open-requests-"));
+    const databasePath = NodePath.join(directory, "state.sqlite");
+    let system = await createOrchestrationSystem(databasePath);
+    const projectId = ProjectId.make("restart-project");
+    const asyncThreadId = ThreadId.make("restart-async-thread");
+    const approvalThreadId = ThreadId.make("restart-approval-thread");
+    const asyncRequestId = ApprovalRequestId.make("codex-async:restart-question");
+    const approvalRequestId = ApprovalRequestId.make("restart-approval");
+    const dispatch = (command: OrchestrationCommand) => system.run(system.engine.dispatch(command));
+    const eventTypesFor = async (commandId: CommandId) =>
+      Array.from(await system.run(Stream.runCollect(system.engine.readEvents(0))))
+        .filter((event) => event.commandId === commandId)
+        .map((event) => event.type);
+    try {
+      await dispatch({
+        type: "project.create",
+        commandId: CommandId.make("restart-project"),
+        projectId,
+        title: "Restart",
+        workspaceRoot: "/tmp/restart-open-requests",
+        createdAt: now(),
+      });
+      for (const [threadId, status, activity] of [
+        [
+          asyncThreadId,
+          "ready",
+          {
+            id: EventId.make("restart-question"),
+            kind: "user-input.requested",
+            summary: "User input requested",
+            tone: "info",
+            turnId: TurnId.make("turn-1"),
+            createdAt: now(),
+            payload: {
+              requestId: asyncRequestId,
+              responseMode: "message",
+              questions: [{ id: "0", header: "Q", question: "Continue?", options: [] }],
+            },
+          },
+        ],
+        [
+          approvalThreadId,
+          // Startup reconciliation leaves an orphaned running session in error.
+          "error",
+          {
+            id: EventId.make("restart-approval"),
+            kind: "approval.requested",
+            summary: "Command approval requested",
+            tone: "approval",
+            turnId: TurnId.make("turn-1"),
+            createdAt: now(),
+            payload: { requestId: approvalRequestId, requestKind: "command" },
+          },
+        ],
+      ] as const) {
+        await dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`create-${threadId}`),
+          threadId,
+          projectId,
+          title: threadId,
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now(),
+        });
+        await dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`session-${threadId}`),
+          threadId,
+          createdAt: now(),
+          session: {
+            threadId,
+            status,
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now(),
+          },
+        });
+        await dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`request-${threadId}`),
+          threadId,
+          createdAt: now(),
+          activity,
+        });
+      }
+
+      await system.dispose();
+      system = await createOrchestrationSystem(databasePath);
+
+      // Snooze refuses to hide blocked-on-you work, as it does before a restart.
+      for (const threadId of [asyncThreadId, approvalThreadId]) {
+        await expect(
+          dispatch({
+            type: "thread.snooze",
+            commandId: CommandId.make(`snooze-${threadId}`),
+            threadId,
+            snoozedUntil: "2099-01-01T00:00:00.000Z",
+          }),
+        ).rejects.toThrow("has a pending approval or user-input request and cannot be snoozed");
+      }
+
+      // A native approval still needs an answer or an interrupted turn.
+      await expect(
+        dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make("settle-approval"),
+          threadId: approvalThreadId,
+        }),
+      ).rejects.toThrow("This thread still needs attention.");
+      expect(Option.getOrThrow(await system.readThreadShell(approvalThreadId))).toMatchObject({
+        settledOverride: null,
+        hasPendingApprovals: true,
+      });
+
+      // Manual settle dismisses the async question it can see after a restart.
+      const settleAsync = CommandId.make("settle-async");
+      await dispatch({ type: "thread.settle", commandId: settleAsync, threadId: asyncThreadId });
+      expect(await eventTypesFor(settleAsync)).toEqual([
+        "thread.settled",
+        "thread.activity-appended",
+      ]);
+      expect(Option.getOrThrow(await system.readThreadShell(asyncThreadId))).toMatchObject({
+        settledOverride: "settled",
+        hasPendingUserInput: false,
+      });
+      await expect(
+        dispatch({
+          type: "thread.user-input.respond",
+          commandId: CommandId.make("answer-after-settle"),
+          threadId: asyncThreadId,
+          requestId: asyncRequestId,
+          answers: { "0": "yes" },
+          createdAt: "2026-01-01T00:00:05.000Z",
+        }),
+      ).rejects.toThrow("This question has already been answered.");
+    } finally {
+      await system.dispose();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it("bootstraps command handling from persisted projections without reading the full snapshot", async () => {
     let nextSequence = 8;
