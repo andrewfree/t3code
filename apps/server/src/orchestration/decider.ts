@@ -57,9 +57,11 @@ const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLin
 
 /**
  * Blocked-on-you work derived from the thread's retained activities: an
- * approval or user-input request with no later resolution for the same
- * requestId. The server-side twin of the shell's hasPendingApprovals /
- * hasPendingUserInput flags, which the decider read model does not carry.
+ * approval or user-input request with no resolution for the same requestId.
+ * Request IDs are unique, so a resolution closes its request in any order:
+ * a client clock can stamp an answer before its question. The server-side
+ * twin of the shell's hasPendingApprovals / hasPendingUserInput flags, which
+ * the decider read model does not carry.
  * The clearing rules MUST match ProjectionPipeline's pending accounting —
  * resolved activities always clear, respond.failed clears only when the
  * failure detail marks the request stale/unknown — or settle would be
@@ -84,6 +86,7 @@ function isStaleRequestFailureDetail(payload: Record<string, unknown> | null): b
 // while the agent works, so they must not expire with the activity window.
 function openRequests(thread: Pick<OrchestrationThread, "activities">) {
   const requests = new Map<string, OrchestrationThreadActivity>();
+  const closedRequestIds = new Set<string>();
   for (const activity of thread.activities) {
     const payload =
       typeof activity.payload === "object" && activity.payload !== null
@@ -92,14 +95,15 @@ function openRequests(thread: Pick<OrchestrationThread, "activities">) {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : null;
     if (requestId === null) continue;
     if (activity.kind === "approval.requested" || activity.kind === "user-input.requested") {
-      requests.set(requestId, activity);
-    } else if (activity.kind === "approval.resolved" || activity.kind === "user-input.resolved") {
-      requests.delete(requestId);
+      if (!closedRequestIds.has(requestId)) requests.set(requestId, activity);
     } else if (
-      (activity.kind === "provider.approval.respond.failed" ||
+      activity.kind === "approval.resolved" ||
+      activity.kind === "user-input.resolved" ||
+      ((activity.kind === "provider.approval.respond.failed" ||
         activity.kind === "provider.user-input.respond.failed") &&
-      isStaleRequestFailureDetail(payload)
+        isStaleRequestFailureDetail(payload))
     ) {
+      closedRequestIds.add(requestId);
       requests.delete(requestId);
     }
   }

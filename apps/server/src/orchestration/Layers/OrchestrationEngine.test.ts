@@ -482,6 +482,156 @@ describe("OrchestrationEngine", () => {
     }
   });
 
+  it("keeps an async answer final when the answering client's clock runs behind", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-skewed-answer-"));
+    const databasePath = NodePath.join(directory, "state.sqlite");
+    let system = await createOrchestrationSystem(databasePath);
+    const projectId = ProjectId.make("skew-project");
+    const threadId = ThreadId.make("skew-thread");
+    const answeredId = ApprovalRequestId.make("codex-async:answered");
+    const openId = ApprovalRequestId.make("codex-async:open");
+    const dispatch = (command: OrchestrationCommand) => system.run(system.engine.dispatch(command));
+    const eventsFor = async (commandId: CommandId) =>
+      Array.from(await system.run(Stream.runCollect(system.engine.readEvents(0)))).filter(
+        (event) => event.commandId === commandId,
+      );
+    const askedAt = "2026-01-01T00:00:10.000Z";
+    const question = (requestId: ApprovalRequestId) => ({
+      type: "thread.activity.append" as const,
+      commandId: CommandId.make(`ask-${requestId}`),
+      threadId,
+      createdAt: askedAt,
+      activity: {
+        id: EventId.make(`ask-${requestId}`),
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info" as const,
+        turnId: TurnId.make("turn-1"),
+        createdAt: askedAt,
+        payload: {
+          requestId,
+          responseMode: "message",
+          questions: [{ id: "0", header: "Q", question: "Continue?", options: [] }],
+        },
+      },
+    });
+    const answer = (commandId: string) => ({
+      type: "thread.user-input.respond" as const,
+      commandId: CommandId.make(commandId),
+      threadId,
+      requestId: answeredId,
+      answers: { "0": "yes" },
+      // The answering client's clock runs ten seconds behind the server.
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    try {
+      await dispatch({
+        type: "project.create",
+        commandId: CommandId.make("skew-project"),
+        projectId,
+        title: "Skew",
+        workspaceRoot: "/tmp/skewed-answer",
+        createdAt: now(),
+      });
+      await dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("skew-thread"),
+        threadId,
+        projectId,
+        title: "Skew",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: now(),
+      });
+      await dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("skew-session"),
+        threadId,
+        createdAt: now(),
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now(),
+        },
+      });
+      await dispatch(question(answeredId));
+      await dispatch(answer("skew-answer"));
+
+      // A second client cannot answer again and start a duplicate turn.
+      await expect(dispatch(answer("skew-second-answer"))).rejects.toThrow(
+        "This question has already been answered.",
+      );
+      expect(Option.getOrThrow(await system.readThreadShell(threadId)).hasPendingUserInput).toBe(
+        false,
+      );
+      await dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("skew-snooze"),
+        threadId,
+        snoozedUntil: "2099-01-01T00:00:00.000Z",
+      });
+      await dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("skew-unsnooze"),
+        threadId,
+        reason: "user",
+      });
+
+      // Later work pushes the answer out of the retained activity window.
+      for (let index = 0; index < 501; index += 1) {
+        await dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`skew-work-${index}`),
+          threadId,
+          createdAt: "2026-01-01T00:00:20.000Z",
+          activity: {
+            id: EventId.make(`skew-work-${index}`),
+            kind: "tool.completed",
+            summary: "Work continued",
+            payload: {},
+            tone: "info",
+            turnId: TurnId.make("turn-2"),
+            createdAt: "2026-01-01T00:00:20.000Z",
+          },
+        });
+      }
+      await dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("skew-snooze-after-work"),
+        threadId,
+        snoozedUntil: "2099-01-01T00:00:00.000Z",
+      });
+      await dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("skew-unsnooze-after-work"),
+        threadId,
+        reason: "user",
+      });
+
+      // After a restart, settling dismisses only the question nobody answered.
+      await dispatch(question(openId));
+      await system.dispose();
+      system = await createOrchestrationSystem(databasePath);
+      const settle = CommandId.make("skew-settle");
+      await dispatch({ type: "thread.settle", commandId: settle, threadId });
+      expect(
+        (await eventsFor(settle))
+          .filter((event) => event.type === "thread.activity-appended")
+          .map((event) => event.payload.activity.payload),
+      ).toEqual([{ requestId: openId, responseMode: "message" }]);
+    } finally {
+      await system.dispose();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("bootstraps command handling from persisted projections without reading the full snapshot", async () => {
     let nextSequence = 8;
     const eventStore: OrchestrationEventStoreShape = {

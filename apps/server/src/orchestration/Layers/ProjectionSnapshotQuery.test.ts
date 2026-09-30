@@ -3084,11 +3084,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
         const ids = new Set(
           detailWithPinnedRequests.value.activities.map((activity) => activity.id),
         );
-        assert.equal(detailWithPinnedRequests.value.activities.length, 503);
+        assert.equal(detailWithPinnedRequests.value.activities.length, 502);
         assert.equal(ids.has(asEventId("approval-old")), true);
         assert.equal(ids.has(asEventId("user-input-old")), true);
         assert.equal(ids.has(asEventId("user-input-closed")), false);
-        assert.equal(ids.has(asEventId("user-input-tied-z-request")), true);
+        // A resolution closes its request whatever order the rows sort in.
+        assert.equal(ids.has(asEventId("user-input-tied-z-request")), false);
       }
 
       const windowWithPinnedRequests = yield* snapshotQuery.getThreadDetailSnapshot(threadW, {
@@ -3099,11 +3100,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
         const ids = new Set(
           windowWithPinnedRequests.value.thread.activities.map((activity) => activity.id),
         );
-        assert.equal(windowWithPinnedRequests.value.thread.activities.length, 503);
+        assert.equal(windowWithPinnedRequests.value.thread.activities.length, 502);
         assert.equal(ids.has(asEventId("approval-old")), true);
         assert.equal(ids.has(asEventId("user-input-old")), true);
         assert.equal(ids.has(asEventId("user-input-closed")), false);
-        assert.equal(ids.has(asEventId("user-input-tied-z-request")), true);
+        assert.equal(ids.has(asEventId("user-input-tied-z-request")), false);
       }
 
       const fullSnapshot = yield* snapshotQuery.getThreadDetailSnapshot(threadW);
