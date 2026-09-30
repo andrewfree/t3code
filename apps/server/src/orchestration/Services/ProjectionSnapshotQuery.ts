@@ -101,6 +101,7 @@ export interface ProjectionSnapshotQueryShape {
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
    * orchestration engine without hydrating message/activity/checkpoint bodies.
+   * Activities hold only unresolved approval and user-input requests.
    */
   readonly getCommandReadModel: () => Effect.Effect<
     OrchestrationReadModel,

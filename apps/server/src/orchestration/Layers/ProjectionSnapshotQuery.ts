@@ -2424,6 +2424,28 @@ pending_approval_requests AS (
         }),
       );
 
+  // The command snapshot omits activity bodies, but the decider's settle and
+  // snooze guards read open approval and user-input requests from them. Load
+  // just the unresolved request rows, for threads whose counts report any.
+  const listOpenRequestActivitiesByThread = (
+    threadRows: ReadonlyArray<Schema.Schema.Type<typeof ProjectionThreadDbRowSchema>>,
+  ) =>
+    Effect.forEach(
+      threadRows.filter((row) => row.pendingApprovalCount > 0 || row.pendingUserInputCount > 0),
+      (row) =>
+        listPinnedThreadActivityRowsByThread({ threadId: row.threadId }).pipe(
+          Effect.map((rows) => [row.threadId, rows.map(mapThreadActivityRow)] as const),
+        ),
+    ).pipe(
+      Effect.map((entries) => new Map<string, OrchestrationThreadActivity[]>(entries)),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getCommandReadModel:listOpenRequestActivities:query",
+          "ProjectionSnapshotQuery.getCommandReadModel:listOpenRequestActivities:decodeRows",
+        ),
+      ),
+    );
+
   const getCommandReadModel: ProjectionSnapshotQueryShape["getCommandReadModel"] = () =>
     sql
       .withTransaction(
@@ -2484,7 +2506,13 @@ pending_approval_requests AS (
               ),
             ),
           ),
-        ]),
+        ]).pipe(
+          Effect.flatMap((rows) =>
+            listOpenRequestActivitiesByThread(rows[1]).pipe(
+              Effect.map((openRequestActivities) => [...rows, openRequestActivities] as const),
+            ),
+          ),
+        ),
       )
       .pipe(
         Effect.flatMap(
@@ -2496,6 +2524,7 @@ pending_approval_requests AS (
             sessionRows,
             latestTurnRows,
             stateRows,
+            openRequestActivities,
           ]) =>
             Effect.gen(function* () {
               const linkedThreadIds = new Set(pullRequestRows.map((row) => row.threadId));
@@ -2643,7 +2672,7 @@ pending_approval_requests AS (
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
-                  activities: [],
+                  activities: openRequestActivities.get(row.threadId) ?? [],
                   checkpoints: [],
                   session: sessionByThread.get(row.threadId) ?? null,
                 });
