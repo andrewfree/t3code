@@ -461,6 +461,71 @@ describe("orchestration projector", () => {
       }),
   );
 
+  effectIt.effect("keeps the running turn latest when an earlier turn's capture lands", () =>
+    Effect.gen(function* () {
+      const now = "2026-09-04T23:00:00.000Z";
+      const event = (sequence: number, type: OrchestrationEvent["type"], payload: unknown) =>
+        makeEvent({
+          sequence,
+          type,
+          payload,
+          aggregateKind: "thread",
+          aggregateId: "thread-late",
+          occurredAt: now,
+          commandId: `late-${sequence}`,
+        });
+      const session = (status: "running" | "ready", activeTurnId: string | null) =>
+        event(0, "thread.session-set", {
+          threadId: "thread-late",
+          session: {
+            threadId: "thread-late",
+            status,
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId,
+            lastError: null,
+            updatedAt: now,
+          },
+        });
+      let model = yield* projectEvent(
+        createEmptyReadModel(now),
+        event(1, "thread.created", {
+          threadId: "thread-late",
+          projectId: "project-1",
+          title: "Late capture",
+          modelSelection: { instanceId: "codex", model: "test" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+      for (const next of [
+        session("running", "turn-1"),
+        session("ready", null),
+        session("running", "turn-2"),
+        event(5, "thread.turn-diff-completed", {
+          threadId: "thread-late",
+          turnId: "turn-1",
+          checkpointTurnCount: 1,
+          checkpointRef: "refs/t3/checkpoints/thread-late/turn/1",
+          status: "ready",
+          files: [],
+          assistantMessageId: null,
+          completedAt: now,
+        }),
+      ]) {
+        model = yield* projectEvent(model, next);
+      }
+      expect(model.threads[0]?.latestTurn).toMatchObject({ turnId: "turn-2", state: "running" });
+      expect(model.threads[0]?.checkpoints.map((checkpoint) => checkpoint.turnId)).toEqual([
+        "turn-1",
+      ]);
+    }),
+  );
+
   effectIt.effect.each([null, "ready", "interrupted", "stopped"] as const)(
     "replaces a missing checkpoint without inventing interruption for a %s session",
     (sessionStatus) =>
