@@ -1792,6 +1792,13 @@ const make = Effect.gen(function* () {
 
       const thread = yield* resolveThreadRuntimeContext(event.threadId);
       if (!thread) return;
+      if (
+        event.type === "session.exited" &&
+        event.providerInstanceId !== undefined &&
+        thread.session?.providerInstanceId !== undefined &&
+        event.providerInstanceId !== thread.session.providerInstanceId
+      )
+        return;
 
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);

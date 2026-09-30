@@ -1095,6 +1095,7 @@ describe("CheckpointReactor", () => {
               threadId,
               status: "running",
               providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex-new"),
               runtimeMode: "approval-required",
               activeTurnId: turnId,
               lastError: null,
@@ -1129,6 +1130,17 @@ describe("CheckpointReactor", () => {
       const crashedTurnId = asTurnId("turn-crashed");
       yield* startTurn(crashedTurnId);
       NodeFS.writeFileSync(NodePath.join(harness.cwd, "crashed.ts"), "export const crashed = 1;\n");
+      harness.provider.emit({
+        type: "session.exited",
+        eventId: EventId.make("evt-replaced-session-exited"),
+        provider: codex,
+        providerInstanceId: ProviderInstanceId.make("codex-old"),
+        createdAt,
+        threadId,
+        payload: { reason: "Replaced by another instance." },
+      });
+      yield* Effect.promise(harness.drain);
+      expect(yield* checkpoints).toEqual([]);
       harness.provider.emit({
         type: "session.exited",
         eventId: EventId.make("evt-session-exited"),
