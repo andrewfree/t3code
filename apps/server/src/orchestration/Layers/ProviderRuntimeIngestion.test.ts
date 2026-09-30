@@ -2954,6 +2954,97 @@ describe("ProviderRuntimeIngestion", () => {
     },
   );
 
+  it("ends the active turn when its provider session exits without a turn event", async () => {
+    const harness = await createHarness();
+    const codex = ProviderDriverKind.make("codex");
+    const threadId = asThreadId("thread-1");
+    const streamingTurnId = asTurnId("crash-streaming-turn");
+    const itemId = asItemId("crash-item");
+    const exited = (eventId: string, createdAt: string): ProviderRuntimeEvent => ({
+      type: "session.exited",
+      eventId: asEventId(eventId),
+      provider: codex,
+      threadId,
+      createdAt,
+      payload: { reason: "Codex App Server exited with code 1." },
+    });
+
+    // The app server dies while the tail of a paragraph is still buffered.
+    await harness.emitAndDrain([
+      {
+        type: "turn.started",
+        eventId: asEventId("crash-streaming-started"),
+        provider: codex,
+        threadId,
+        turnId: streamingTurnId,
+        createdAt: "2026-01-01T00:00:00.500Z",
+      },
+      {
+        type: "content.delta",
+        eventId: asEventId("crash-delta-1"),
+        provider: codex,
+        threadId,
+        turnId: streamingTurnId,
+        itemId,
+        createdAt: "2026-01-01T00:00:00.600Z",
+        payload: { streamKind: "assistant_text", delta: "Done paragraph.\n\nPartial tail" },
+      },
+    ]);
+    harness.advanceClock(5_000);
+    await harness.emitAndDrain([
+      {
+        type: "content.delta",
+        eventId: asEventId("crash-delta-2"),
+        provider: codex,
+        threadId,
+        turnId: streamingTurnId,
+        itemId,
+        createdAt: "2026-01-01T00:00:00.700Z",
+        payload: { streamKind: "assistant_text", delta: " still buffered" },
+      },
+      exited("crash-streaming-exited", "2026-01-01T00:00:01.000Z"),
+    ]);
+    const afterStreamingExit = (await harness.readModel()).threads[0]!;
+    expect(afterStreamingExit.latestTurn).toMatchObject({
+      turnId: streamingTurnId,
+      state: "interrupted",
+    });
+    expect(
+      afterStreamingExit.messages.find((message) => message.id === `assistant:${itemId}`),
+    ).toMatchObject({
+      text: "Done paragraph.\n\nPartial tail still buffered",
+      streaming: false,
+    });
+
+    // The app server dies while its turn waits on a native question.
+    const question = userInputEvent("crash-question-turn", "crash-question");
+    await harness.emitAndDrain([
+      {
+        type: "turn.started",
+        eventId: asEventId("crash-question-started"),
+        provider: codex,
+        threadId,
+        turnId: question.turnId,
+        createdAt: "2026-01-01T00:00:01.500Z",
+      },
+      question,
+    ]);
+    expect((await harness.readThreadShell()).hasPendingUserInput).toBe(true);
+    await harness.emitAndDrain([exited("crash-question-exited", "2026-01-01T00:00:03.000Z")]);
+    expect((await harness.readThreadShell()).hasPendingUserInput).toBe(false);
+    expect(
+      (await harness.readModel()).threads[0]!.activities.filter(
+        (activity) => activity.kind === "user-input.resolved",
+      ),
+    ).toMatchObject([{ turnId: question.turnId, payload: { requestId: question.requestId } }]);
+    await harness.dispatch({
+      type: "thread.settle",
+      commandId: CommandId.make("crash-settle"),
+      threadId,
+    });
+    expect((await harness.readThreadShell()).settledOverride).toBe("settled");
+  });
+
   it("keeps a stale request dismissed when its turn later completes", async () => {
     const harness = await createHarness();
     const request = userInputEvent("stale-turn", "stale-question");
