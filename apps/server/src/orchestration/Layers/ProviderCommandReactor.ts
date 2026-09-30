@@ -1656,16 +1656,25 @@ const make = Effect.gen(function* () {
       })
       .pipe(
         Effect.catchCause((cause) =>
-          appendProviderFailureActivity({
-            threadId: event.payload.threadId,
-            kind: "provider.approval.respond.failed",
-            summary: "Provider approval response failed",
-            detail: isUnknownPendingApprovalRequestError(cause)
-              ? stalePendingRequestDetail("approval", event.payload.requestId)
-              : Cause.pretty(cause),
-            turnId: null,
-            createdAt: event.payload.createdAt,
-            requestId: event.payload.requestId,
+          Effect.gen(function* () {
+            if (Cause.hasInterruptsOnly(cause)) return yield* Effect.interrupt;
+            const orphaned =
+              thread.session?.status === "error" &&
+              !(yield* providerService.listSessions()).some(
+                (session) => session.threadId === event.payload.threadId,
+              );
+            return yield* appendProviderFailureActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.approval.respond.failed",
+              summary: "Provider approval response failed",
+              detail:
+                orphaned || isUnknownPendingApprovalRequestError(cause)
+                  ? stalePendingRequestDetail("approval", event.payload.requestId)
+                  : Cause.pretty(cause),
+              turnId: null,
+              createdAt: event.payload.createdAt,
+              requestId: event.payload.requestId,
+            });
           }),
         ),
       );
@@ -1703,16 +1712,25 @@ const make = Effect.gen(function* () {
         })
         .pipe(
           Effect.catchCause((cause) =>
-            appendProviderFailureActivity({
-              threadId: event.payload.threadId,
-              kind: "provider.user-input.respond.failed",
-              summary: "Provider user input response failed",
-              detail: isUnknownPendingUserInputRequestError(cause)
-                ? stalePendingRequestDetail("user-input", event.payload.requestId)
-                : Cause.pretty(cause),
-              turnId: null,
-              createdAt: event.payload.createdAt,
-              requestId: event.payload.requestId,
+            Effect.gen(function* () {
+              if (Cause.hasInterruptsOnly(cause)) return yield* Effect.interrupt;
+              const orphaned =
+                thread.session?.status === "error" &&
+                !(yield* providerService.listSessions()).some(
+                  (session) => session.threadId === event.payload.threadId,
+                );
+              return yield* appendProviderFailureActivity({
+                threadId: event.payload.threadId,
+                kind: "provider.user-input.respond.failed",
+                summary: "Provider user input response failed",
+                detail:
+                  orphaned || isUnknownPendingUserInputRequestError(cause)
+                    ? stalePendingRequestDetail("user-input", event.payload.requestId)
+                    : Cause.pretty(cause),
+                turnId: null,
+                createdAt: event.payload.createdAt,
+                requestId: event.payload.requestId,
+              });
             }),
           ),
         );

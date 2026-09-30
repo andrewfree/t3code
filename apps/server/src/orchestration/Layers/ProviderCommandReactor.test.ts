@@ -42,6 +42,7 @@ import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 import {
   ProviderAdapterRequestError,
+  ProviderValidationError,
   ProviderWorkspaceMissingError,
   type ProviderServiceError,
 } from "../../provider/Errors.ts";
@@ -4326,6 +4327,157 @@ describe("ProviderCommandReactor", () => {
           threadId,
         });
         expect((yield* readShell).settledOverride).toBe("settled");
+      }),
+  );
+
+  // Startup reconciliation leaves a session that did not survive a restart in
+  // "error". Answering its request makes the provider service try to recover
+  // the session, and a failed recovery leaves nothing to deliver the answer to.
+  // A failed reply on a live session stays open so the user can retry.
+  effectIt.effect.each([
+    { requestKind: "approval", session: "orphaned" },
+    { requestKind: "user-input", session: "orphaned" },
+    { requestKind: "approval", session: "live" },
+    { requestKind: "user-input", session: "live" },
+  ] as const)(
+    "handles a native $requestKind reply that fails on an $session session",
+    ({ requestKind, session }) =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness());
+        const now = "2026-01-01T00:00:00.000Z";
+        const answeredAt = "2026-01-01T00:00:05.000Z";
+        const threadId = ThreadId.make("thread-1");
+        const requestId = asApprovalRequestId(`${requestKind}-${session}`);
+        const readShell = harness.snapshotQuery
+          .getThreadShellById(threadId)
+          .pipe(Effect.map(Option.getOrThrow));
+        const replyFailure = () =>
+          Effect.fail(
+            session === "orphaned"
+              ? new ProviderValidationError({
+                  operation:
+                    requestKind === "approval"
+                      ? "ProviderService.respondToRequest"
+                      : "ProviderService.respondToUserInput",
+                  issue:
+                    "Cannot recover thread 'thread-1' because no provider resume state is persisted.",
+                })
+              : new ProviderAdapterRequestError({
+                  provider: ProviderDriverKind.make("opencode"),
+                  method: requestKind === "approval" ? "permission.reply" : "question.reply",
+                  detail: "OpenCode is still loading this permission request. Try again.",
+                }),
+          );
+        harness.respondToRequest.mockImplementation(replyFailure);
+        harness.respondToUserInput.mockImplementation(replyFailure);
+        if (session === "live") {
+          harness.runtimeSessions.push({
+            provider: ProviderDriverKind.make("opencode"),
+            status: "running",
+            runtimeMode: "approval-required",
+            threadId,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+
+        yield* harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`cmd-${requestKind}-${session}-requested`),
+          threadId,
+          activity: {
+            id: EventId.make(`activity-${requestKind}-${session}-requested`),
+            tone: "approval",
+            kind: requestKind === "approval" ? "approval.requested" : "user-input.requested",
+            summary: "Request opened",
+            payload: {
+              requestId,
+              ...(requestKind === "approval"
+                ? { requestKind: "command" }
+                : { questions: [{ id: "q", header: "Q", question: "Continue?", options: [] }] }),
+            },
+            turnId: null,
+            createdAt: now,
+          },
+          createdAt: now,
+        });
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-${requestKind}-${session}-session`),
+          threadId,
+          session: {
+            threadId,
+            status: session === "orphaned" ? "error" : "running",
+            providerName: session === "orphaned" ? "codex" : "opencode",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError:
+              session === "orphaned"
+                ? "Provider session did not survive a server restart. Send a new message to continue."
+                : null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
+        yield* harness.engine.dispatch(
+          requestKind === "approval"
+            ? {
+                type: "thread.approval.respond",
+                commandId: CommandId.make(`cmd-approval-${session}-respond`),
+                threadId,
+                requestId,
+                decision: "accept",
+                createdAt: answeredAt,
+              }
+            : {
+                type: "thread.user-input.respond",
+                commandId: CommandId.make(`cmd-user-input-${session}-respond`),
+                threadId,
+                requestId,
+                answers: { q: "yes" },
+                createdAt: answeredAt,
+              },
+        );
+        yield* Effect.promise(() => harness.drain());
+
+        const respond =
+          requestKind === "approval" ? harness.respondToRequest : harness.respondToUserInput;
+        expect(respond).toHaveBeenCalledTimes(1);
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+          (entry) => entry.id === threadId,
+        );
+        const failureDetail = (
+          thread?.activities.find(
+            (activity) => activity.kind === `provider.${requestKind}.respond.failed`,
+          )?.payload as { detail?: unknown } | undefined
+        )?.detail;
+        const settle = yield* Effect.exit(
+          harness.engine.dispatch({
+            type: "thread.settle",
+            commandId: CommandId.make(`cmd-${requestKind}-${session}-settle`),
+            threadId,
+          }),
+        );
+
+        if (session === "live") {
+          expect(failureDetail).toEqual(expect.stringContaining("Try again."));
+          expect(yield* readShell).toMatchObject(
+            requestKind === "approval"
+              ? { hasPendingApprovals: true }
+              : { hasPendingUserInput: true },
+          );
+          expect(Exit.isFailure(settle)).toBe(true);
+          return;
+        }
+        expect(failureDetail).toEqual(
+          expect.stringContaining(`Stale pending ${requestKind} request: ${requestId}`),
+        );
+        expect(yield* readShell).toMatchObject({
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          settledOverride: "settled",
+        });
+        expect(Exit.isSuccess(settle)).toBe(true);
       }),
   );
 
