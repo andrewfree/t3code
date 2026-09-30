@@ -1080,9 +1080,20 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isNone(existingRow)) {
             return;
           }
+          // A capture can land after the next turn started. It must not move
+          // the latest turn off the turn the session is running.
+          const session = yield* projectionThreadSessionRepository.getByThreadId({
+            threadId: event.payload.threadId,
+          });
+          const sessionTurnRunning =
+            Option.isSome(session) &&
+            session.value.status === "running" &&
+            session.value.activeTurnId !== null;
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            latestTurnId: event.payload.turnId,
+            latestTurnId: sessionTurnRunning
+              ? existingRow.value.latestTurnId
+              : event.payload.turnId,
             updatedAt: event.occurredAt,
           });
           yield* refreshThreadShellSummary(event.payload.threadId);

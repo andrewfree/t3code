@@ -989,14 +989,16 @@ export function projectEvent(
 
         // Mid-turn diff updates produce placeholder checkpoints; record the
         // checkpoint, but don't settle a turn its session is still running.
-        const turnStillRunning =
-          thread.session?.status === "running" && thread.session.activeTurnId === payload.turnId;
+        // A capture that lands after the next turn started must not replace
+        // that turn either.
+        const sessionTurnRunning =
+          thread.session?.status === "running" && thread.session.activeTurnId !== null;
 
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             checkpoints,
-            latestTurn: turnStillRunning
+            latestTurn: sessionTurnRunning
               ? thread.latestTurn
               : {
                   turnId: payload.turnId,

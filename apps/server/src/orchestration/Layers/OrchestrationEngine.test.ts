@@ -632,6 +632,105 @@ describe("OrchestrationEngine", () => {
     }
   });
 
+  it("keeps the next turn latest when an earlier turn's checkpoint lands late", async () => {
+    const system = await createOrchestrationSystem();
+    const projectId = ProjectId.make("late-checkpoint-project");
+    const threadId = ThreadId.make("late-checkpoint-thread");
+    const turnOne = asTurnId("late-turn-1");
+    const turnTwo = asTurnId("late-turn-2");
+    const dispatch = (command: OrchestrationCommand) => system.run(system.engine.dispatch(command));
+    const at = (second: number) => `2026-01-01T00:00:0${second}.000Z`;
+    const setSession = (status: "ready" | "running", activeTurnId: TurnId | null, second: number) =>
+      dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make(`late-session-${second}`),
+        threadId,
+        createdAt: at(second),
+        session: {
+          threadId,
+          status,
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId,
+          lastError: null,
+          updatedAt: at(second),
+        },
+      });
+    const startTurn = (messageId: string, second: number) =>
+      dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`late-start-${messageId}`),
+        threadId,
+        message: { messageId: asMessageId(messageId), role: "user", text: "Go", attachments: [] },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: at(second),
+      });
+    const latestTurn = async () => {
+      const shell = Option.getOrThrow(await system.readThreadShell(threadId)).latestTurn;
+      const detail = Option.getOrThrow(await system.readThread(threadId)).latestTurn;
+      return [shell, detail].map((turn) => turn && { turnId: turn.turnId, state: turn.state });
+    };
+    try {
+      await dispatch({
+        type: "project.create",
+        commandId: CommandId.make("late-project"),
+        projectId,
+        title: "Late checkpoint",
+        workspaceRoot: "/tmp/late-checkpoint",
+        createdAt: at(0),
+      });
+      await dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("late-thread"),
+        threadId,
+        projectId,
+        title: "Late checkpoint",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        branch: null,
+        worktreePath: null,
+        createdAt: at(0),
+      });
+      await startTurn("late-message-1", 1);
+      await setSession("running", turnOne, 2);
+      await setSession("ready", null, 3);
+      // A queued follow-up starts the next turn before turn one's capture lands.
+      await startTurn("late-message-2", 4);
+      await setSession("running", turnTwo, 5);
+      await dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("late-capture-turn-1"),
+        threadId,
+        turnId: turnOne,
+        completedAt: at(3),
+        checkpointRef: asCheckpointRef("refs/t3/late/1"),
+        status: "ready",
+        files: [],
+        checkpointTurnCount: 1,
+        createdAt: at(6),
+      });
+
+      expect(await latestTurn()).toEqual([
+        { turnId: turnTwo, state: "running" },
+        { turnId: turnTwo, state: "running" },
+      ]);
+      expect(
+        Option.getOrThrow(await system.readThread(threadId)).checkpoints.map(
+          (checkpoint) => checkpoint.turnId,
+        ),
+      ).toEqual([turnOne]);
+      await setSession("ready", null, 7);
+      expect(await latestTurn()).toEqual([
+        { turnId: turnTwo, state: "completed" },
+        { turnId: turnTwo, state: "completed" },
+      ]);
+    } finally {
+      await system.dispose();
+    }
+  });
+
   it("bootstraps command handling from persisted projections without reading the full snapshot", async () => {
     let nextSequence = 8;
     const eventStore: OrchestrationEventStoreShape = {
