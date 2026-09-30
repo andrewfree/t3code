@@ -958,6 +958,13 @@ const make = Effect.gen(function* () {
     event: ProviderRuntimeEvent,
   ) {
     if (event.type === "session.exited") {
+      const thread = yield* resolveThreadDetail(event.threadId);
+      if (
+        event.providerInstanceId !== undefined &&
+        thread?.session?.providerInstanceId !== undefined &&
+        event.providerInstanceId !== thread.session.providerInstanceId
+      )
+        return;
       const startedTurnId = startedTurns.get(event.threadId);
       startedTurns.delete(event.threadId);
       pending.delete(event.threadId);

@@ -2954,6 +2954,50 @@ describe("ProviderRuntimeIngestion", () => {
     },
   );
 
+  it("ignores a delayed exit from a replaced provider instance", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("replacement-turn");
+    const provider = ProviderDriverKind.make("codex");
+    await harness.emitAndDrain([
+      {
+        type: "turn.started",
+        eventId: asEventId("replacement-started"),
+        provider,
+        providerInstanceId: ProviderInstanceId.make("codex-new"),
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      },
+    ]);
+    await harness.dispatch({
+      type: "thread.message.assistant.delta",
+      commandId: CommandId.make("replacement-text"),
+      threadId,
+      messageId: MessageId.make("replacement-message"),
+      turnId,
+      delta: "New session is still working.",
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await harness.emitAndDrain([
+      {
+        type: "session.exited",
+        eventId: asEventId("replaced-exited"),
+        provider,
+        providerInstanceId: ProviderInstanceId.make("codex-old"),
+        threadId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        payload: { reason: "Replaced by another instance." },
+      },
+    ]);
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.session).toMatchObject({ status: "running", activeTurnId: turnId });
+    expect(thread.messages.find((message) => message.id === "replacement-message")).toMatchObject({
+      text: "New session is still working.",
+      streaming: true,
+    });
+  });
+
   it("ends the active turn when its provider session exits without a turn event", async () => {
     const harness = await createHarness();
     const codex = ProviderDriverKind.make("codex");
