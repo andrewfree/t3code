@@ -2347,8 +2347,10 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (isTerminalTurn) {
-        const turnId = toTurnId(event.turnId);
+      // A provider process that dies mid-turn exits without a terminal turn
+      // event, so its session exit ends the active turn.
+      if (isTerminalTurn || event.type === "session.exited") {
+        const turnId = isTerminalTurn ? toTurnId(event.turnId) : activeTurnId;
         if (turnId) {
           const userInputActivities =
             yield* projectionThreadActivityRepository.listUserInputLifecycleByThreadId({
