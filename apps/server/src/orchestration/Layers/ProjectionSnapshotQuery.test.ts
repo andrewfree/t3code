@@ -3054,12 +3054,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
           ),
           (
             'user-input-tied-z-request', 'thread-w', NULL, 'approval', 'user-input.requested',
-            'Tied open question', '{"requestId":"input-tied-open"}', NULL,
+            'Tied closed question', '{"requestId":"input-tied-closed"}', NULL,
             '2026-03-01T00:00:05.000Z'
           ),
           (
             'user-input-tied-a-resolution', 'thread-w', NULL, 'info', 'user-input.resolved',
-            'Tied open question', '{"requestId":"input-tied-open"}', NULL,
+            'Tied closed question', '{"requestId":"input-tied-closed"}', NULL,
             '2026-03-01T00:00:05.000Z'
           )
       `;
