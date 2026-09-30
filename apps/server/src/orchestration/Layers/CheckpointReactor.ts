@@ -389,10 +389,16 @@ const make = Effect.gen(function* () {
     });
   });
 
-  // Capture the files left by a completed or interrupted turn.
+  // Capture the files left by a completed or interrupted turn. A session that
+  // exits mid-turn interrupted its turn without reporting it.
   const captureCheckpointFromTurnCompletion = Effect.fn("captureCheckpointFromTurnCompletion")(
-    function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" | "turn.aborted" }>) {
-      const turnId = toTurnId(event.turnId);
+    function* (
+      event: Extract<
+        ProviderRuntimeEvent,
+        { type: "turn.completed" | "turn.aborted" | "session.exited" }
+      >,
+      turnId: TurnId | null,
+    ) {
       if (!turnId) {
         return;
       }
@@ -449,9 +455,9 @@ const make = Effect.gen(function* () {
         cwd: checkpointCwd,
         turnCount: nextTurnCount,
         status:
-          event.type === "turn.aborted"
-            ? "ready"
-            : checkpointStatusFromRuntime(event.payload.state),
+          event.type === "turn.completed"
+            ? checkpointStatusFromRuntime(event.payload.state)
+            : "ready",
         assistantMessageId: existingPlaceholder?.assistantMessageId ?? undefined,
         createdAt: event.createdAt,
       });
@@ -933,12 +939,33 @@ const make = Effect.gen(function* () {
     }
   });
 
+  const captureTurnCheckpoint = (
+    event: Parameters<typeof captureCheckpointFromTurnCompletion>[0],
+    turnId: TurnId | null,
+  ) =>
+    captureCheckpointFromTurnCompletion(event, turnId).pipe(
+      Effect.catch((error) =>
+        Effect.flatMap(nowIso, (createdAt) =>
+          appendCaptureFailureActivity({
+            threadId: event.threadId,
+            turnId,
+            detail: error.message,
+            createdAt,
+          }).pipe(Effect.catch(() => Effect.void)),
+        ),
+      ),
+    );
+
   const processRuntimeEvent = Effect.fn("processRuntimeEvent")(function* (
     event: ProviderRuntimeEvent,
   ) {
     if (event.type === "session.exited") {
+      const startedTurnId = startedTurns.get(event.threadId);
       startedTurns.delete(event.threadId);
       pending.delete(event.threadId);
+      if (startedTurnId !== undefined) {
+        yield* captureTurnCheckpoint(event, startedTurnId);
+      }
       return;
     }
 
@@ -982,18 +1009,7 @@ const make = Effect.gen(function* () {
       ) {
         return;
       }
-      yield* captureCheckpointFromTurnCompletion(event).pipe(
-        Effect.catch((error) =>
-          Effect.flatMap(nowIso, (createdAt) =>
-            appendCaptureFailureActivity({
-              threadId: event.threadId,
-              turnId,
-              detail: error.message,
-              createdAt,
-            }).pipe(Effect.catch(() => Effect.void)),
-          ),
-        ),
-      );
+      yield* captureTurnCheckpoint(event, turnId);
       return;
     }
   });

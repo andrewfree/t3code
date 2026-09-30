@@ -1075,6 +1075,95 @@ describe("CheckpointReactor", () => {
       }),
   );
 
+  effectIt.effect("captures a turn whose provider session exits before the turn ends", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({ seedFilesystemCheckpoints: false }),
+      );
+      const threadId = ThreadId.make("thread-1");
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const codex = ProviderDriverKind.make("codex");
+      const startTurn = (turnId: TurnId) =>
+        Effect.gen(function* () {
+          yield* harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`cmd-session-running-${turnId}`),
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: turnId,
+              lastError: null,
+              updatedAt: createdAt,
+            },
+            createdAt,
+          });
+          harness.provider.emit({
+            type: "turn.started",
+            eventId: EventId.make(`evt-start-${turnId}`),
+            provider: codex,
+            createdAt,
+            threadId,
+            turnId,
+          });
+          yield* Effect.promise(harness.drain);
+        });
+      const checkpoints = Effect.promise(harness.readModel).pipe(
+        Effect.map((readModel) =>
+          readModel.threads
+            .find((entry) => entry.id === threadId)
+            ?.checkpoints.map((checkpoint) => ({
+              turnId: checkpoint.turnId,
+              checkpointTurnCount: checkpoint.checkpointTurnCount,
+              status: checkpoint.status,
+              files: checkpoint.files.map((file) => file.path),
+            })),
+        ),
+      );
+
+      // The app server dies mid-turn: no turn.completed or turn.aborted.
+      const crashedTurnId = asTurnId("turn-crashed");
+      yield* startTurn(crashedTurnId);
+      NodeFS.writeFileSync(NodePath.join(harness.cwd, "crashed.ts"), "export const crashed = 1;\n");
+      harness.provider.emit({
+        type: "session.exited",
+        eventId: EventId.make("evt-session-exited"),
+        provider: codex,
+        createdAt,
+        threadId,
+        payload: { reason: "Codex App Server exited with code 1." },
+      });
+      yield* Effect.promise(harness.drain);
+      expect(yield* checkpoints).toEqual([
+        { turnId: crashedTurnId, checkpointTurnCount: 1, status: "ready", files: ["crashed.ts"] },
+      ]);
+      expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(true);
+
+      // The next turn's diff holds only its own edits.
+      const nextTurnId = asTurnId("turn-after-crash");
+      yield* startTurn(nextTurnId);
+      NodeFS.writeFileSync(NodePath.join(harness.cwd, "next.ts"), "export const next = 2;\n");
+      harness.provider.emit({
+        type: "turn.completed",
+        eventId: EventId.make("evt-complete-after-crash"),
+        provider: codex,
+        createdAt,
+        threadId,
+        turnId: nextTurnId,
+        payload: { state: "completed" },
+      });
+      yield* Effect.promise(harness.drain);
+      expect((yield* checkpoints)?.at(-1)).toEqual({
+        turnId: nextTurnId,
+        checkpointTurnCount: 2,
+        status: "ready",
+        files: ["next.ts"],
+      });
+    }),
+  );
+
   it("does not capture an aborted turn without a matching start or active session", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     harness.provider.emit({
