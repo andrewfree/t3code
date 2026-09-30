@@ -161,14 +161,12 @@ function shouldRefreshThreadShellSummary(event: OrchestrationEvent): boolean {
 function derivePendingUserInputCountFromActivities(
   activities: ReadonlyArray<ProjectionThreadActivity>,
 ): number {
-  const openRequestIds = new Set<string>();
-  const ordered = [...activities].toSorted(
-    (left, right) =>
-      left.createdAt.localeCompare(right.createdAt) ||
-      left.activityId.localeCompare(right.activityId),
-  );
+  // Request IDs are unique, so a closing activity is final in any order: a
+  // client clock can stamp an answer before the request it answers.
+  const requestedIds = new Set<string>();
+  const closedIds = new Set<string>();
 
-  for (const activity of ordered) {
+  for (const activity of activities) {
     const requestId = extractActivityRequestId(activity.payload);
     if (requestId === null) {
       continue;
@@ -180,12 +178,12 @@ function derivePendingUserInputCountFromActivities(
     const detail = typeof payload?.detail === "string" ? payload.detail.toLowerCase() : null;
 
     if (activity.kind === "user-input.requested") {
-      openRequestIds.add(requestId);
+      requestedIds.add(requestId);
       continue;
     }
 
     if (activity.kind === "user-input.resolved") {
-      openRequestIds.delete(requestId);
+      closedIds.add(requestId);
       continue;
     }
 
@@ -197,11 +195,15 @@ function derivePendingUserInputCountFromActivities(
         detail.includes("unknown pending user input request") ||
         detail.includes("unknown pending codex user input request"))
     ) {
-      openRequestIds.delete(requestId);
+      closedIds.add(requestId);
     }
   }
 
-  return openRequestIds.size;
+  let openCount = 0;
+  for (const requestId of requestedIds) {
+    if (!closedIds.has(requestId)) openCount += 1;
+  }
+  return openCount;
 }
 
 function retainProjectionMessagesAfterRevert(

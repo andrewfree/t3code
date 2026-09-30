@@ -1523,7 +1523,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       WHERE thread_id = ${threadId}
         AND kind IN ('user-input.requested', 'user-input.resolved')
         AND json_extract(payload_json, '$.requestId') = ${requestId}
-      ORDER BY sequence DESC, created_at DESC, activity_id DESC
+      -- A resolution is final even when a client clock stamped it before
+      -- the request.
+      ORDER BY kind = 'user-input.resolved' DESC, sequence DESC, created_at DESC, activity_id DESC
       LIMIT 1
     `,
   });
@@ -1892,9 +1894,14 @@ pending_approval_requests AS (
           SELECT
             activity.activity_id,
             activity.kind,
+            -- A closing row ranks first: it is final even when a client
+            -- clock stamped it before the request.
             ROW_NUMBER() OVER (
               PARTITION BY json_extract(activity.payload_json, '$.requestId')
-              ORDER BY activity.created_at DESC, activity.activity_id DESC
+              ORDER BY
+                activity.kind = 'user-input.requested',
+                activity.created_at DESC,
+                activity.activity_id DESC
             ) AS request_order
           FROM pending_user_input_thread AS pending
           CROSS JOIN projection_thread_activities AS activity

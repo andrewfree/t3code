@@ -66,20 +66,30 @@ function retainThreadActivities(activities: OrchestrationThread["activities"]) {
   const recentStart = activities.length - 500;
   if (recentStart <= 0) return activities;
   const pending = new Map<string, OrchestrationThread["activities"][number]>();
+  const resolvedRequestIds = new Set<string>();
   for (const activity of activities) {
     if (!Predicate.isObject(activity.payload)) continue;
     const requestId = activity.payload.requestId;
     if (typeof requestId !== "string") continue;
     if (activity.kind === "user-input.requested" && activity.payload.responseMode === "message") {
-      pending.set(requestId, activity);
+      if (!resolvedRequestIds.has(requestId)) pending.set(requestId, activity);
     } else if (activity.kind === "user-input.resolved") {
+      resolvedRequestIds.add(requestId);
       pending.delete(requestId);
     }
   }
   const pendingActivities = new Set(pending.values());
+  // A client clock can stamp an answer before its question, so the answer can
+  // leave the window first. Drop answered questions with it, or the question
+  // would read as open again.
+  const isAnsweredQuestion = (activity: OrchestrationThread["activities"][number]) =>
+    activity.kind === "user-input.requested" &&
+    Predicate.isObject(activity.payload) &&
+    typeof activity.payload.requestId === "string" &&
+    resolvedRequestIds.has(activity.payload.requestId);
   return activities.filter(
     (activity, index) =>
-      index >= recentStart ||
+      (index >= recentStart && !isAnsweredQuestion(activity)) ||
       pendingActivities.has(activity) ||
       // The worktree setup record is upserted under one id for the thread's
       // whole life and is the only durable copy of a running setup; an async
