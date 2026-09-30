@@ -4233,6 +4233,102 @@ describe("ProviderCommandReactor", () => {
     expect(resolvedActivity).toBeUndefined();
   });
 
+  effectIt.effect.each(["approval", "user-input"] as const)(
+    "clears a native %s request answered after its provider session exited",
+    (requestKind) =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness());
+        const now = "2026-01-01T00:00:00.000Z";
+        const answeredAt = "2026-01-01T00:00:05.000Z";
+        const threadId = ThreadId.make("thread-1");
+        const requestId = asApprovalRequestId(`${requestKind}-after-exit`);
+        const readShell = harness.snapshotQuery
+          .getThreadShellById(threadId)
+          .pipe(Effect.map(Option.getOrThrow));
+
+        yield* harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`cmd-${requestKind}-requested`),
+          threadId,
+          activity: {
+            id: EventId.make(`activity-${requestKind}-requested`),
+            tone: "approval",
+            kind: requestKind === "approval" ? "approval.requested" : "user-input.requested",
+            summary: "Request opened",
+            payload: {
+              requestId,
+              ...(requestKind === "approval"
+                ? { requestKind: "command" }
+                : { questions: [{ id: "q", header: "Q", question: "Continue?", options: [] }] }),
+            },
+            turnId: null,
+            createdAt: now,
+          },
+          createdAt: now,
+        });
+        // The provider process exited, so nothing can answer its callbacks.
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-${requestKind}-session-stopped`),
+          threadId,
+          session: {
+            threadId,
+            status: "stopped",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
+        yield* harness.engine.dispatch(
+          requestKind === "approval"
+            ? {
+                type: "thread.approval.respond",
+                commandId: CommandId.make("cmd-approval-respond-after-exit"),
+                threadId,
+                requestId,
+                decision: "accept",
+                createdAt: answeredAt,
+              }
+            : {
+                type: "thread.user-input.respond",
+                commandId: CommandId.make("cmd-user-input-respond-after-exit"),
+                threadId,
+                requestId,
+                answers: { q: "yes" },
+                createdAt: answeredAt,
+              },
+        );
+        yield* Effect.promise(() => harness.drain());
+
+        expect(harness.respondToRequest).not.toHaveBeenCalled();
+        expect(harness.respondToUserInput).not.toHaveBeenCalled();
+        expect(yield* readShell).toMatchObject({
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+        });
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+          (entry) => entry.id === threadId,
+        );
+        expect(
+          thread?.activities.find(
+            (activity) => activity.kind === `provider.${requestKind}.respond.failed`,
+          )?.payload,
+        ).toMatchObject({
+          requestId,
+          detail: expect.stringContaining(`Stale pending ${requestKind} request: ${requestId}`),
+        });
+        yield* harness.engine.dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make(`cmd-${requestKind}-settle-after-exit`),
+          threadId,
+        });
+        expect((yield* readShell).settledOverride).toBe("settled");
+      }),
+  );
+
   it("surfaces non-resumable provider user-input callbacks as stale failures", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
