@@ -1635,11 +1635,13 @@ const make = Effect.gen(function* () {
     }
     const hasSession = thread.session && thread.session.status !== "stopped";
     if (!hasSession) {
+      // A stopped session took its callbacks with it: mark the request stale
+      // so it stops blocking the thread.
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.approval.respond.failed",
         summary: "Provider approval response failed",
-        detail: "No active provider session is bound to this thread.",
+        detail: stalePendingRequestDetail("approval", event.payload.requestId),
         turnId: null,
         createdAt: event.payload.createdAt,
         requestId: event.payload.requestId,
@@ -1683,7 +1685,7 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           kind: "provider.user-input.respond.failed",
           summary: "Provider user input response failed",
-          detail: "No active provider session is bound to this thread.",
+          detail: stalePendingRequestDetail("user-input", event.payload.requestId),
           turnId: null,
           createdAt: event.payload.createdAt,
           requestId: event.payload.requestId,
