@@ -1,3 +1,4 @@
+import { CheckpointReactor } from "../src/orchestration/Services/CheckpointReactor.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
@@ -70,6 +71,7 @@ const makePersistedRuntimeLayer = (dbPath: string) => {
 };
 
 const startupDependencies = Layer.mergeAll(
+  Layer.mock(CheckpointReactor)({ captureInterruptedTurn: () => Effect.void }),
   Layer.mock(Keybindings.Keybindings)({
     start: Effect.void,
   }),
@@ -472,6 +474,123 @@ it.effect.each(["opt-in desktop restart", "marked remote update"] as const)(
           continuation: true,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(makePersistedRuntimeLayer(config.dbPath), startupDependencies),
+        ),
+      );
+    }).pipe(
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-restart-newer-turn-" }).pipe(
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    ),
+);
+
+it.effect(
+  "finalizes persisted assistant text when an active turn cannot resume after restart",
+  () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const createdAt = DateTime.formatIso(yield* DateTime.now);
+      const activeTurnId = TurnId.make("turn-started-after-original-send");
+      const originalTurnId = TurnId.make("turn-from-original-send");
+
+      yield* Effect.gen(function* () {
+        const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("create-restart-project"),
+          projectId,
+          title: "Restart continuation",
+          workspaceRoot: "/tmp/startup-orphan-project",
+          defaultModelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create-restart-thread"),
+          threadId,
+          projectId,
+          title: "Newer running turn",
+          modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("persist-newer-running-turn"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            providerInstanceId,
+            runtimeMode: "full-access",
+            activeTurnId,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.message.assistant.delta",
+          commandId: CommandId.make("persist-partial-assistant"),
+          threadId,
+          messageId: MessageId.make("partial-before-restart"),
+          turnId: activeTurnId,
+          delta: "Work saved before the restart.",
+          createdAt,
+        });
+        yield* directory.upsert({
+          threadId,
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId,
+          status: "running",
+          resumeCursor,
+          runtimePayload: { activeTurnId: originalTurnId },
+        });
+      }).pipe(Effect.provide(makePersistedRuntimeLayer(config.dbPath)));
+
+      yield* Effect.gen(function* () {
+        const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const before = Option.getOrThrow(yield* query.getThreadDetailById(threadId));
+        assert.equal(before.session?.activeTurnId, activeTurnId);
+        assert.propertyVal(
+          Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload,
+          "activeTurnId",
+          originalTurnId,
+        );
+        const captures: TurnId[] = [];
+        yield* ServerRuntimeStartup.reconcileProviderSessions.pipe(
+          Effect.provideService(CheckpointReactor, {
+            start: () => Effect.void,
+            drain: Effect.void,
+            captureInterruptedTurn: (input) =>
+              Effect.gen(function* () {
+                captures.push(input.turnId);
+                const capturing = Option.getOrThrow(
+                  yield* query.getThreadDetailById(threadId).pipe(Effect.orDie),
+                );
+                assert.equal(capturing.messages[0]?.streaming, false);
+                assert.equal(capturing.session?.activeTurnId, activeTurnId);
+              }),
+          }),
+        );
+        assert.deepStrictEqual(captures, [activeTurnId]);
+        const after = Option.getOrThrow(yield* query.getThreadDetailById(threadId));
+        assert.equal(after.session?.status, "error");
+        assert.equal(after.session?.activeTurnId, null);
+        assert.equal(after.messages[0]?.text, "Work saved before the restart.");
+        assert.equal(after.messages[0]?.streaming, false);
+        assert.equal(after.latestTurn?.turnId, activeTurnId);
+        assert.equal(after.latestTurn?.state, "error");
       }).pipe(
         Effect.provide(
           Layer.mergeAll(makePersistedRuntimeLayer(config.dbPath), startupDependencies),

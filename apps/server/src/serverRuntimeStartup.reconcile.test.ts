@@ -1,3 +1,4 @@
+import { CheckpointReactor } from "./orchestration/Services/CheckpointReactor.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   type OrchestrationCommand,
@@ -75,6 +76,7 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
 const queryWithThreads = (threads: ReadonlyArray<ReturnType<typeof makeThread>>) =>
   ({
     getUserInputActivity: () => Effect.die("unused"),
+    getThreadDetailById: () => Effect.succeed(Option.none()),
     getCommandReadModel: () => Effect.succeed({ threads } as never),
   }) as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
 
@@ -87,6 +89,7 @@ const runReconciliation = (input: {
   readonly dispatch: OrchestrationEngine.OrchestrationEngineService["Service"]["dispatch"];
 }) =>
   ServerRuntimeStartup.reconcileProviderSessions.pipe(
+    Effect.provide(Layer.mock(CheckpointReactor)({ captureInterruptedTurn: () => Effect.void })),
     Effect.provideService(
       ProjectionSnapshotQuery.ProjectionSnapshotQuery,
       queryWithThreads(input.threads),
@@ -688,8 +691,10 @@ it.effect("retries failed projections and continues after a persistent failure",
 it.effect("does not fail startup when the live provider session inventory cannot be read", () => {
   let queried = false;
   return ServerRuntimeStartup.reconcileProviderSessions.pipe(
+    Effect.provide(Layer.mock(CheckpointReactor)({ captureInterruptedTurn: () => Effect.void })),
     Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
       getUserInputActivity: () => Effect.die("unused"),
+      getThreadDetailById: () => Effect.succeed(Option.none()),
       getCommandReadModel: () =>
         Effect.sync(() => {
           queried = true;
