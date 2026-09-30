@@ -393,10 +393,11 @@ const make = Effect.gen(function* () {
   // exits mid-turn interrupted its turn without reporting it.
   const captureCheckpointFromTurnCompletion = Effect.fn("captureCheckpointFromTurnCompletion")(
     function* (
-      event: Extract<
-        ProviderRuntimeEvent,
-        { type: "turn.completed" | "turn.aborted" | "session.exited" }
-      >,
+      event: {
+        readonly threadId: ThreadId;
+        readonly createdAt: string;
+        readonly status: "ready" | "missing" | "error";
+      },
       turnId: TurnId | null,
     ) {
       if (!turnId) {
@@ -454,10 +455,7 @@ const make = Effect.gen(function* () {
         thread,
         cwd: checkpointCwd,
         turnCount: nextTurnCount,
-        status:
-          event.type === "turn.completed"
-            ? checkpointStatusFromRuntime(event.payload.state)
-            : "ready",
+        status: event.status,
         assistantMessageId: existingPlaceholder?.assistantMessageId ?? undefined,
         createdAt: event.createdAt,
       });
@@ -964,7 +962,7 @@ const make = Effect.gen(function* () {
       startedTurns.delete(event.threadId);
       pending.delete(event.threadId);
       if (startedTurnId !== undefined) {
-        yield* captureTurnCheckpoint(event, startedTurnId);
+        yield* captureTurnCheckpoint({ ...event, status: "ready" }, startedTurnId);
       }
       return;
     }
@@ -1009,7 +1007,16 @@ const make = Effect.gen(function* () {
       ) {
         return;
       }
-      yield* captureTurnCheckpoint(event, turnId);
+      yield* captureTurnCheckpoint(
+        {
+          ...event,
+          status:
+            event.type === "turn.completed"
+              ? checkpointStatusFromRuntime(event.payload.state)
+              : "ready",
+        },
+        turnId,
+      );
       return;
     }
   });
@@ -1069,6 +1076,8 @@ const make = Effect.gen(function* () {
 
   return {
     start,
+    captureInterruptedTurn: (input) =>
+      captureTurnCheckpoint({ ...input, status: "ready" }, input.turnId),
     drain: worker.drain.pipe(
       Effect.andThen(statusRefreshWorker.drain),
       Effect.andThen(entryRefreshWorker.drain),

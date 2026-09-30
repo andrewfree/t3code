@@ -6,6 +6,7 @@
  *
  * @module CheckpointReactor
  */
+import type { ThreadId, TurnId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
@@ -30,6 +31,12 @@ export interface CheckpointReactorShape {
    * Intended for test use to replace timing-sensitive sleeps.
    */
   readonly drain: Effect.Effect<void>;
+
+  readonly captureInterruptedTurn: (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly createdAt: string;
+  }) => Effect.Effect<void>;
 }
 
 /**

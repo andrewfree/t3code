@@ -38,6 +38,7 @@ import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import { CheckpointReactor } from "./orchestration/Services/CheckpointReactor.ts";
 import * as OrchestrationReactor from "./orchestration/Services/OrchestrationReactor.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerSettings from "./serverSettings.ts";
@@ -617,6 +618,34 @@ export const reconcileProviderSessions = Effect.gen(function* () {
 
         yield* Effect.gen(function* () {
           const reconciledAt = DateTime.formatIso(yield* DateTime.now);
+          if (session.activeTurnId !== null) {
+            const detail = yield* query.getThreadDetailById(thread.id);
+            if (Option.isSome(detail)) {
+              for (const message of detail.value.messages) {
+                if (
+                  message.role !== "assistant" ||
+                  !message.streaming ||
+                  message.turnId !== session.activeTurnId
+                )
+                  continue;
+                yield* orchestrationEngine.dispatch({
+                  type: "thread.message.assistant.complete",
+                  commandId: CommandId.make(yield* crypto.randomUUIDv4),
+                  threadId: thread.id,
+                  messageId: message.id,
+                  turnId: session.activeTurnId,
+                  createdAt: reconciledAt,
+                });
+              }
+            }
+            // Startup workers are parked until activation, so capture before opening the command gate.
+            const checkpoints = yield* CheckpointReactor;
+            yield* checkpoints.captureInterruptedTurn({
+              threadId: thread.id,
+              turnId: session.activeTurnId,
+              createdAt: reconciledAt,
+            });
+          }
           yield* orchestrationEngine.dispatch({
             type: "thread.session.set",
             commandId: CommandId.make(yield* crypto.randomUUIDv4),
