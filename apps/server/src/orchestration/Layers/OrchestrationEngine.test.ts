@@ -731,6 +731,184 @@ describe("OrchestrationEngine", () => {
     }
   });
 
+  it("keeps turn checkpoints and messages through interrupt, settle, restart, and resume", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-lifecycle-keep-"));
+    const databasePath = NodePath.join(directory, "state.sqlite");
+    let system = await createOrchestrationSystem(databasePath);
+    const projectId = ProjectId.make("keep-project");
+    const threadId = ThreadId.make("keep-thread");
+    const dispatch = (command: OrchestrationCommand) => system.run(system.engine.dispatch(command));
+    const at = (second: number) => `2026-01-01T00:00:${String(second).padStart(2, "0")}.000Z`;
+    const setSession = (
+      id: string,
+      status: "ready" | "running" | "interrupted",
+      activeTurnId: TurnId | null,
+      second: number,
+    ) =>
+      dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make(id),
+        threadId,
+        createdAt: at(second),
+        session: {
+          threadId,
+          status,
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId,
+          lastError: null,
+          updatedAt: at(second),
+        },
+      });
+    const startTurn = (messageId: string, second: number) =>
+      dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`start-${messageId}`),
+        threadId,
+        message: {
+          messageId: asMessageId(messageId),
+          role: "user",
+          text: messageId,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: at(second),
+      });
+    const completeDiff = (
+      turnId: TurnId,
+      checkpointTurnCount: number,
+      checkpointRef: string,
+      status: "ready" | "missing",
+      second: number,
+    ) =>
+      dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make(`diff-${turnId}-${status}-${second}`),
+        threadId,
+        turnId,
+        completedAt: at(second),
+        checkpointRef: asCheckpointRef(checkpointRef),
+        status,
+        files: [],
+        checkpointTurnCount,
+        createdAt: at(second),
+      });
+    const turnOne = asTurnId("keep-turn-1");
+    const turnTwo = asTurnId("keep-turn-2");
+    const expectedCheckpoints = [
+      { turnId: turnOne, checkpointTurnCount: 1, status: "ready", checkpointRef: "refs/t3/1" },
+      { turnId: turnTwo, checkpointTurnCount: 2, status: "ready", checkpointRef: "refs/t3/2" },
+    ];
+    const readKept = async () => {
+      const thread = Option.getOrThrow(await system.readThread(threadId));
+      return {
+        messageIds: thread.messages.map((message) => message.id),
+        checkpoints: thread.checkpoints.map(
+          ({ turnId, checkpointTurnCount, status, checkpointRef }) => ({
+            turnId,
+            checkpointTurnCount,
+            status,
+            checkpointRef,
+          }),
+        ),
+        latestTurn: thread.latestTurn && {
+          turnId: thread.latestTurn.turnId,
+          state: thread.latestTurn.state,
+        },
+        settledOverride: thread.settledOverride,
+      };
+    };
+    try {
+      await dispatch({
+        type: "project.create",
+        commandId: CommandId.make("keep-project"),
+        projectId,
+        title: "Keep",
+        workspaceRoot: "/tmp/lifecycle-keep",
+        createdAt: at(0),
+      });
+      await dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("keep-thread"),
+        threadId,
+        projectId,
+        title: "Keep",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        branch: null,
+        worktreePath: null,
+        createdAt: at(0),
+      });
+
+      // A completed turn.
+      await startTurn("keep-message-1", 1);
+      await setSession("keep-running-1", "running", turnOne, 2);
+      await dispatch({
+        type: "thread.message.assistant.delta",
+        commandId: CommandId.make("keep-assistant-delta"),
+        threadId,
+        messageId: asMessageId("keep-assistant-1"),
+        delta: "Done.",
+        turnId: turnOne,
+        createdAt: at(3),
+      });
+      await dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("keep-assistant-complete"),
+        threadId,
+        messageId: asMessageId("keep-assistant-1"),
+        turnId: turnOne,
+        createdAt: at(3),
+      });
+      await completeDiff(turnOne, 1, "refs/t3/1", "ready", 4);
+      await setSession("keep-ready-1", "ready", null, 4);
+
+      // An interrupted turn whose checkpoint lands after the session stops.
+      await startTurn("keep-message-2", 5);
+      await setSession("keep-running-2", "running", turnTwo, 6);
+      await dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("keep-interrupt"),
+        threadId,
+        turnId: turnTwo,
+        createdAt: at(7),
+      });
+      await setSession("keep-interrupted-2", "interrupted", null, 8);
+      await completeDiff(turnTwo, 2, "refs/t3/2", "ready", 9);
+      const afterInterrupt = await readKept();
+      expect(afterInterrupt).toEqual({
+        messageIds: ["keep-message-1", "keep-assistant-1", "keep-message-2"],
+        checkpoints: expectedCheckpoints,
+        latestTurn: { turnId: turnTwo, state: "interrupted" },
+        settledOverride: null,
+      });
+
+      await dispatch({ type: "thread.settle", commandId: CommandId.make("keep-settle"), threadId });
+      expect(await readKept()).toEqual({ ...afterInterrupt, settledOverride: "settled" });
+
+      await system.dispose();
+      system = await createOrchestrationSystem(databasePath);
+      expect(await readKept()).toEqual({ ...afterInterrupt, settledOverride: "settled" });
+
+      // The restarted command model holds no checkpoints, so the decider
+      // accepts a late provider placeholder; the projection keeps the capture.
+      await completeDiff(turnTwo, 2, "provider-diff:late", "missing", 10);
+      expect(await readKept()).toEqual({ ...afterInterrupt, settledOverride: "settled" });
+
+      await startTurn("keep-message-3", 11);
+      expect(await readKept()).toEqual({
+        ...afterInterrupt,
+        messageIds: [...afterInterrupt.messageIds, "keep-message-3"],
+        settledOverride: null,
+      });
+    } finally {
+      await system.dispose();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("bootstraps command handling from persisted projections without reading the full snapshot", async () => {
     let nextSequence = 8;
     const eventStore: OrchestrationEventStoreShape = {
