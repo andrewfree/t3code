@@ -51,6 +51,7 @@ export type T3McpToolSummaryAction =
   | "project-clone"
   | "environment-read"
   | "environment-update"
+  | "provider-update"
   | "attachment-prepare"
   | "attachment-discard"
   | "attachment-send"
@@ -313,6 +314,10 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_environment_preferences_update: tool(
     ["Update", "Updating", "Updated", "environment preferences"],
     "environment-update",
+  ),
+  t3_provider_instance_update: tool(
+    ["Update", "Updating", "Updated", "a provider configuration"],
+    "provider-update",
   ),
   t3_thread_launch: tool(["Launch", "Launching", "Launched", "a project thread"], "thread-create"),
   t3_project_list: tool(["List", "Listing", "Listed", "projects"], "project-list"),

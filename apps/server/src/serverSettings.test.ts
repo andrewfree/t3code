@@ -598,6 +598,98 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   );
 
   it.effect.each([
+    { implementation: "persisted", representation: "config enabled" },
+    { implementation: "persisted", representation: "false redaction flag" },
+    { implementation: "test", representation: "config enabled" },
+    { implementation: "test", representation: "false redaction flag" },
+  ] as const)(
+    "$implementation service accepts its original $representation representation for guarded updates and cleanup",
+    ({ implementation, representation }) =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("codex_normalized_owned");
+        const instance: ProviderInstanceConfig = {
+          driver: ProviderDriverKind.make("codex"),
+          displayName: "Owned entry",
+          ...(representation === "config enabled"
+            ? { config: { binaryPath: "codex", enabled: false } }
+            : {
+                environment: [
+                  { name: "PUBLIC_MODE", value: "first", sensitive: false, valueRedacted: false },
+                ],
+              }),
+        };
+        yield* service.updateProviderInstance({ operation: "create", instanceId, instance });
+        const updated = { ...instance, displayName: "Updated entry" };
+        yield* service.updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          instance: updated,
+          expectedInstance: instance,
+        });
+        assert.equal(
+          (yield* service.getSettings).providerInstances[instanceId]?.displayName,
+          "Updated entry",
+        );
+        yield* service.updateProviderInstance({
+          operation: "remove",
+          instanceId,
+          expectedInstance: updated,
+        });
+        assert.isUndefined((yield* service.getSettings).providerInstances[instanceId]);
+      }).pipe(Effect.provide(layerServerSettings(implementation))),
+  );
+
+  it.effect.each([
+    { implementation: "persisted", representation: "config enabled" },
+    { implementation: "persisted", representation: "false redaction flag" },
+    { implementation: "test", representation: "config enabled" },
+    { implementation: "test", representation: "false redaction flag" },
+  ] as const)(
+    "$implementation service preserves meaningful edits while normalizing a $representation expectation",
+    ({ implementation, representation }) =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("codex_normalized_changed");
+        const instance: ProviderInstanceConfig = {
+          driver: ProviderDriverKind.make("codex"),
+          ...(representation === "config enabled"
+            ? { config: { binaryPath: "codex", enabled: false } }
+            : {
+                environment: [
+                  { name: "PUBLIC_MODE", value: "first", sensitive: false, valueRedacted: false },
+                ],
+              }),
+        };
+        yield* service.updateProviderInstance({ operation: "create", instanceId, instance });
+        const changed: ProviderInstanceConfig = {
+          driver: instance.driver,
+          ...(representation === "config enabled"
+            ? { enabled: true, config: { binaryPath: "codex" } }
+            : { environment: [{ name: "PUBLIC_MODE", value: "second", sensitive: false }] }),
+        };
+        yield* service.updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          instance: changed,
+        });
+        const before = yield* service.getSettings;
+        for (const operation of ["remove", "upsert"] as const) {
+          const error = yield* service
+            .updateProviderInstance(
+              operation === "remove"
+                ? { operation, instanceId, expectedInstance: instance }
+                : { operation, instanceId, expectedInstance: instance, instance },
+              { responseStreamingMode: "turn" },
+            )
+            .pipe(Effect.flip);
+          assert.equal(error.operation, "check-provider-instance");
+          assert.deepEqual(yield* service.getSettings, before);
+        }
+      }).pipe(Effect.provide(layerServerSettings(implementation))),
+  );
+
+  it.effect.each([
     { implementation: "persisted", operation: "upsert" },
     { implementation: "persisted", operation: "remove" },
     { implementation: "test", operation: "upsert" },

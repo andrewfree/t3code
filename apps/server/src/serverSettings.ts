@@ -165,6 +165,19 @@ export function applyProviderInstanceMutation(
   return { ...settings, providerInstances };
 }
 
+const canonicalProviderInstanceExpectation = (
+  instanceId: ProviderInstanceId,
+  instance: ProviderInstanceConfig | null,
+) =>
+  instance === null
+    ? null
+    : foldProviderInstanceEnabledFlags(
+        mapSettingsSecrets(
+          { ...DEFAULT_SERVER_SETTINGS, providerInstances: { [instanceId]: instance } },
+          (secret) => secret,
+        ),
+      ).providerInstances[instanceId];
+
 function ensureProviderInstanceMutationAllowed(
   settings: ServerSettings,
   mutation: ProviderInstanceMutation,
@@ -193,7 +206,13 @@ function ensureProviderInstanceMutationAllowed(
         },
       );
     }
-    if (hasSecret || !Equal.equals(current ?? null, mutation.expectedInstance)) {
+    if (
+      hasSecret ||
+      !Equal.equals(
+        canonicalProviderInstanceExpectation(mutation.instanceId, current ?? null),
+        canonicalProviderInstanceExpectation(mutation.instanceId, mutation.expectedInstance),
+      )
+    ) {
       return Effect.fail(
         new ServerSettingsError({
           settingsPath,

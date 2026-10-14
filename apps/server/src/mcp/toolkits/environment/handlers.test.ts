@@ -160,7 +160,7 @@ it.effect("updates one provider through /mcp and returns only mutation metadata"
       decodeFailure(
         duplicate.content.map((part) => (part.type === "text" ? part.text : "")).join(""),
       ),
-    ).toEqual({ code: "orchestration_error" });
+    ).toEqual({ code: "invalid_request" });
     const stale = yield* callProviderUpdate({
       operation: "remove",
       instanceId,
@@ -169,7 +169,7 @@ it.effect("updates one provider through /mcp and returns only mutation metadata"
     expect(stale.isError).toBe(true);
     expect(
       decodeFailure(stale.content.map((part) => (part.type === "text" ? part.text : "")).join("")),
-    ).toEqual({ code: "orchestration_error" });
+    ).toEqual({ code: "invalid_request" });
     yield* settings.updateSettings({ newWorktreesStartFromOrigin: true });
     const removed = yield* callProviderUpdate({
       operation: "remove",

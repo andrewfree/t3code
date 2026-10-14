@@ -69,7 +69,7 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
 const ProviderInstanceUpdateTool = Tool.make("t3_provider_instance_update", {
   ...shared,
   description:
-    "Atomically create, replace, or remove one provider configuration without replacing other settings. Requires a live full-access/default calling thread or full-access client. Create refuses an existing id. For upsert/remove, expectedInstance optionally compares the persisted entry before mutation; null requires absence. Conditional mutations refuse secret-bearing entries. Returns only mutation metadata, never configuration values.",
+    "Atomically create, replace, or remove one provider configuration without replacing other settings. Requires a live full-access/default calling thread or full-access client. Create refuses an existing id. For upsert/remove, expectedInstance optionally compares the persisted entry before mutation; null requires absence. Conditional mutations refuse secret-bearing entries. Omit unset fields; null is valid only for expectedInstance. Returns only mutation metadata, never configuration values.",
   parameters: Schema.Struct({ mutation: ProviderInstanceMutation }),
   success: Schema.Struct({
     instanceId: ProviderInstanceId,

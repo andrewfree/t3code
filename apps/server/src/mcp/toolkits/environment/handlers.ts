@@ -1,4 +1,8 @@
-import { OrchestratorMcpFailure, type ServerSettings } from "@t3tools/contracts";
+import {
+  OrchestratorMcpFailure,
+  type ServerSettings,
+  type ServerSettingsError,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
@@ -40,6 +44,23 @@ const access = Effect.gen(function* () {
     });
   return { ...context, descriptor, settings: yield* Settings.ServerSettingsService };
 });
+const providerMutationFailure = (error: ServerSettingsError) => {
+  switch (error.operation) {
+    case "create-provider-instance":
+      return new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: "A provider with that id already exists.",
+      });
+    case "check-provider-instance":
+      return new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message:
+          "The provider configuration changed or contains secrets; the conditional mutation was refused.",
+      });
+    default:
+      return unavailable();
+  }
+};
 export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
   t3_environment_read: McpToolAccess.reads(() =>
     Effect.gen(function* () {
@@ -79,7 +100,9 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
       const update = Effect.gen(function* () {
         yield* check;
         const { settings } = yield* access;
-        yield* settings.updateProviderInstance(mutation).pipe(Effect.mapError(unavailable));
+        yield* settings
+          .updateProviderInstance(mutation)
+          .pipe(Effect.mapError(providerMutationFailure));
         return {
           instanceId: mutation.instanceId,
           operation: mutation.operation,
