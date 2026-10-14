@@ -72,4 +72,23 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
         : executor.withLock(scope.thread.threadId, update);
     }),
   ),
+  t3_provider_instance_update: McpToolAccess.writesEnvironment(({ mutation }, check) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+      const update = Effect.gen(function* () {
+        yield* check;
+        const { settings } = yield* access;
+        yield* settings.updateProviderInstance(mutation).pipe(Effect.mapError(unavailable));
+        return {
+          instanceId: mutation.instanceId,
+          operation: mutation.operation,
+          updated: true as const,
+        };
+      });
+      return yield* scope.thread === undefined
+        ? update
+        : executor.withLock(scope.thread.threadId, update);
+    }),
+  ),
 });

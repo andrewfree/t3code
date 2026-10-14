@@ -6,6 +6,7 @@ import {
   ProviderInstanceConfig,
   ProviderInstanceConfigMap,
   ProviderInstanceId,
+  ProviderInstanceMutation,
   ProviderInstanceRef,
 } from "./providerInstance.ts";
 
@@ -14,6 +15,7 @@ const decodeProviderInstanceId = Schema.decodeUnknownSync(ProviderInstanceId);
 const decodeProviderInstanceRef = Schema.decodeUnknownSync(ProviderInstanceRef);
 const decodeProviderInstanceConfig = Schema.decodeUnknownSync(ProviderInstanceConfig);
 const decodeProviderInstanceConfigMap = Schema.decodeUnknownSync(ProviderInstanceConfigMap);
+const decodeProviderInstanceMutation = Schema.decodeUnknownSync(ProviderInstanceMutation);
 
 describe("provider slug validation (shared by driver + instance ids)", () => {
   const cases = [
@@ -169,6 +171,43 @@ describe("ProviderInstanceConfig", () => {
     expect(() => decodeProviderInstanceConfig({ driver: "" })).toThrow();
     expect(() => decodeProviderInstanceConfig({ driver: "has spaces" })).toThrow();
   });
+});
+
+describe("ProviderInstanceMutation", () => {
+  it.each(["upsert", "remove"])("preserves optional %s expectations", (operation) => {
+    const base = {
+      operation,
+      instanceId: "codex_probe",
+      ...(operation === "upsert" ? { instance: { driver: "codex" } } : {}),
+    };
+    expect(decodeProviderInstanceMutation(base)).not.toHaveProperty("expectedInstance");
+    expect(decodeProviderInstanceMutation({ ...base, expectedInstance: null })).toHaveProperty(
+      "expectedInstance",
+      null,
+    );
+    const expectedInstance = {
+      driver: "codex",
+      config: { homePath: "/run/.codex" },
+      environment: [{ name: "GH_TOKEN", value: "", sensitive: false }],
+    };
+    expect(decodeProviderInstanceMutation({ ...base, expectedInstance })).toHaveProperty(
+      "expectedInstance",
+      expectedInstance,
+    );
+  });
+
+  it.each([false, "absent", { driver: "invalid driver" }])(
+    "rejects invalid expectations: %j",
+    (expectedInstance) => {
+      expect(() =>
+        decodeProviderInstanceMutation({
+          operation: "remove",
+          instanceId: "codex_probe",
+          expectedInstance,
+        }),
+      ).toThrow();
+    },
+  );
 });
 
 describe("ProviderInstanceConfigMap", () => {

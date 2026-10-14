@@ -5,9 +5,11 @@ import {
   ProjectId,
   ProjectScript,
   ProviderDriverKind,
+  type ProviderInstanceConfig,
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
   ServerSettings,
+  type ServerSettingsError,
   ServerSettingsPatch,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
@@ -38,8 +40,18 @@ const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
 
-const layerServerSettings = () =>
-  ServerSettingsModule.layer.pipe(
+const layerServerSettings = (implementation: "persisted" | "test" = "persisted") => {
+  const layer: Layer.Layer<
+    ServerSettingsModule.ServerSettingsService,
+    ServerSettingsError,
+    | FileSystem.FileSystem
+    | Path.Path
+    | ServerConfig.ServerConfig
+    | ServerSecretStore.ServerSecretStore
+    | SqlClient.SqlClient
+  > =
+    implementation === "persisted" ? ServerSettingsModule.layer : ServerSettingsModule.layerTest();
+  return layer.pipe(
     Layer.provide(ServerSecretStore.layer),
     Layer.provideMerge(Layer.fresh(SqlitePersistence.layerMemory)),
     Layer.provideMerge(
@@ -50,6 +62,7 @@ const layerServerSettings = () =>
       ),
     ),
   );
+};
 
 /** Like `layerServerSettings`, but also exposes the secret store for assertions. */
 const layerServerSettingsWithSecrets = () =>
@@ -518,6 +531,283 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         ),
       );
     }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect.each(["persisted", "test"] as const)(
+    "%s service preserves unrelated writes during conditional provider cleanup",
+    (implementation) =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("codex_owned_probe");
+        const otherId = ProviderInstanceId.make("codex_other");
+        const instance: ProviderInstanceConfig = {
+          driver: ProviderDriverKind.make("codex"),
+          displayName: "Owned probe",
+          config: { homePath: "/run/.codex", binaryPath: "codex" },
+          environment: [
+            { name: "DO_NOT_TRACK", value: "1", sensitive: false },
+            { name: "GH_TOKEN", value: "", sensitive: false },
+            { name: "GITHUB_TOKEN", value: "", sensitive: false },
+          ],
+        };
+        yield* service.updateProviderInstance({ operation: "create", instanceId, instance });
+        const duplicate = yield* service
+          .updateProviderInstance({
+            operation: "create",
+            instanceId,
+            instance: { ...instance, displayName: "Collision" },
+          })
+          .pipe(Effect.result);
+        assert.equal(duplicate._tag, "Failure");
+        assert.equal(
+          (yield* service.getSettings).providerInstances[instanceId]?.displayName,
+          "Owned probe",
+        );
+
+        yield* Effect.all(
+          [
+            service.updateSettings({ responseStreamingMode: "turn" }),
+            service.updateProviderInstance({
+              operation: "upsert",
+              instanceId: otherId,
+              instance: { driver: ProviderDriverKind.make("codex"), displayName: "Other edit" },
+            }),
+            service.updateProviderInstance({
+              operation: "remove",
+              instanceId,
+              expectedInstance: {
+                ...instance,
+                config: { binaryPath: "codex", homePath: "/run/.codex" },
+              },
+            }),
+          ],
+          { concurrency: "unbounded" },
+        );
+        const next = yield* service.getSettings;
+        assert.isUndefined(next.providerInstances[instanceId]);
+        assert.equal(next.providerInstances[otherId]?.displayName, "Other edit");
+        assert.equal(next.responseStreamingMode, "turn");
+        if (implementation === "persisted") {
+          const fs = yield* FileSystem.FileSystem;
+          const { settingsPath } = yield* ServerConfig.ServerConfig;
+          const saved = yield* decodeServerSettingsJson(yield* fs.readFileString(settingsPath));
+          assert.deepEqual(saved.providerInstances, next.providerInstances);
+          assert.equal(saved.responseStreamingMode, "turn");
+        }
+      }).pipe(Effect.provide(layerServerSettings(implementation))),
+  );
+
+  it.effect.each([
+    { implementation: "persisted", operation: "upsert" },
+    { implementation: "persisted", operation: "remove" },
+    { implementation: "test", operation: "upsert" },
+    { implementation: "test", operation: "remove" },
+  ] as const)(
+    "$implementation service rejects a stale $operation expectation before applying its patch",
+    ({ implementation, operation }) =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("codex_changed");
+        const original = { driver: ProviderDriverKind.make("codex"), displayName: "Original" };
+        yield* service.updateProviderInstance({
+          operation: "create",
+          instanceId,
+          instance: original,
+        });
+        yield* service.updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          expectedInstance: original,
+          instance: { ...original, displayName: "Another edit" },
+        });
+        const before = yield* service.getSettings;
+        const error = yield* service
+          .updateProviderInstance(
+            operation === "remove"
+              ? { operation, instanceId, expectedInstance: original }
+              : { operation, instanceId, expectedInstance: original, instance: original },
+            { responseStreamingMode: "turn" },
+          )
+          .pipe(Effect.flip);
+        assert.deepInclude(error, {
+          _tag: "ServerSettingsError",
+          operation: "check-provider-instance",
+          providerInstanceId: instanceId,
+        });
+        assert.isUndefined(error.cause);
+        assert.deepEqual(yield* service.getSettings, before);
+      }).pipe(Effect.provide(layerServerSettings(implementation))),
+  );
+
+  it.effect.each(["persisted", "test"] as const)(
+    "%s service treats a null expectation as absence",
+    (implementation) =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("codex_absent");
+        const instance = { driver: ProviderDriverKind.make("codex") };
+        yield* service.updateProviderInstance({
+          operation: "remove",
+          instanceId,
+          expectedInstance: null,
+        });
+        yield* service.updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          instance,
+          expectedInstance: null,
+        });
+        const error = yield* service
+          .updateProviderInstance({
+            operation: "remove",
+            instanceId,
+            expectedInstance: null,
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.operation, "check-provider-instance");
+        assert.deepEqual((yield* service.getSettings).providerInstances[instanceId], instance);
+        yield* service.updateProviderInstance({
+          operation: "remove",
+          instanceId,
+          expectedInstance: instance,
+        });
+      }).pipe(Effect.provide(layerServerSettings(implementation))),
+  );
+
+  it.effect.each([
+    { implementation: "persisted", kind: "environment" },
+    { implementation: "persisted", kind: "config" },
+    { implementation: "test", kind: "environment" },
+    { implementation: "test", kind: "config" },
+  ] as const)(
+    "$implementation service rejects guarded $kind credentials without changing unguarded behavior",
+    ({ implementation, kind }) =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("antigravity_guarded_secret");
+        const instance: ProviderInstanceConfig = {
+          driver: ProviderDriverKind.make("antigravity"),
+          ...(kind === "environment"
+            ? { environment: [{ name: "API_TOKEN", value: "test-secret", sensitive: true }] }
+            : { config: { apiKey: "test-secret" } }),
+        };
+        const created = yield* service.updateProviderInstance({
+          operation: "create",
+          instanceId,
+          instance,
+        });
+        const redacted = ServerSettingsModule.redactServerSettingsForClient(created);
+        for (const expectedInstance of [instance, redacted.providerInstances[instanceId]!]) {
+          const error = yield* service
+            .updateProviderInstance({
+              operation: "remove",
+              instanceId,
+              expectedInstance,
+            })
+            .pipe(Effect.flip);
+          assert.equal(error.operation, "check-provider-instance");
+          assert.notInclude(error.message, "test-secret");
+          assert.isUndefined(error.cause);
+        }
+        yield* service.updateProviderInstance({ operation: "remove", instanceId });
+        assert.isUndefined((yield* service.getSettings).providerInstances[instanceId]);
+      }).pipe(Effect.provide(layerServerSettings(implementation))),
+  );
+
+  it.effect.each(["stale", "secret", "duplicate"] as const)(
+    "rejects a %s mutation before writing settings or accessing secrets",
+    (condition) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        let fileWrites = 0;
+        let secretAccesses = 0;
+        const trackedFs = FileSystem.FileSystem.of({
+          ...fs,
+          writeFileString: (...args) =>
+            Effect.sync(() => {
+              fileWrites += 1;
+            }).pipe(Effect.andThen(fs.writeFileString(...args))),
+        });
+        const trackedSecrets = Layer.effect(
+          ServerSecretStore.ServerSecretStore,
+          Effect.gen(function* () {
+            const store = yield* ServerSecretStore.ServerSecretStore;
+            const accessed = Effect.sync(() => {
+              secretAccesses += 1;
+            });
+            return ServerSecretStore.ServerSecretStore.of({
+              ...store,
+              get: (name) => accessed.pipe(Effect.andThen(store.get(name))),
+              set: (name, value) => accessed.pipe(Effect.andThen(store.set(name, value))),
+              remove: (name) => accessed.pipe(Effect.andThen(store.remove(name))),
+            });
+          }),
+        ).pipe(Layer.provide(ServerSecretStore.layer));
+        const layerSettings = ServerSettingsModule.layer.pipe(
+          Layer.provide(trackedSecrets),
+          Layer.provideMerge(Layer.fresh(SqlitePersistence.layerMemory)),
+          Layer.provideMerge(
+            Layer.fresh(
+              ServerConfig.layerTest(process.cwd(), {
+                prefix: "t3code-provider-condition-test-",
+              }),
+            ),
+          ),
+          Layer.provide(Layer.succeed(FileSystem.FileSystem, trackedFs)),
+        );
+        yield* Effect.gen(function* () {
+          const service = yield* ServerSettingsModule.ServerSettingsService;
+          const { settingsPath } = yield* ServerConfig.ServerConfig;
+          const instanceId = ProviderInstanceId.make("antigravity_owned");
+          const instance: ProviderInstanceConfig = {
+            driver: ProviderDriverKind.make("antigravity"),
+            displayName: "Current entry",
+            ...(condition === "secret" ? { config: { apiKey: "test-kept-secret" } } : {}),
+          };
+          const created = yield* service.updateProviderInstance({
+            operation: "create",
+            instanceId,
+            instance,
+          });
+          const before = yield* fs.readFileString(settingsPath);
+          const redacted =
+            ServerSettingsModule.redactServerSettingsForClient(created).providerInstances[
+              instanceId
+            ]!;
+          fileWrites = 0;
+          secretAccesses = 0;
+          const error = yield* service
+            .updateProviderInstance(
+              condition === "secret"
+                ? { operation: "remove", instanceId, expectedInstance: redacted }
+                : condition === "duplicate"
+                  ? {
+                      operation: "create",
+                      instanceId,
+                      instance: { ...instance, config: { apiKey: "test-new-secret" } },
+                    }
+                  : {
+                      operation: "upsert",
+                      instanceId,
+                      expectedInstance: { ...instance, displayName: "Stale entry" },
+                      instance: { ...instance, config: { apiKey: "test-new-secret" } },
+                    },
+              { responseStreamingMode: "turn" },
+            )
+            .pipe(Effect.flip);
+          assert.equal(
+            error.operation,
+            condition === "duplicate" ? "create-provider-instance" : "check-provider-instance",
+          );
+          assert.equal(fileWrites, 0);
+          assert.equal(secretAccesses, 0);
+          assert.equal(yield* fs.readFileString(settingsPath), before);
+          assert.deepEqual(
+            (yield* service.getSettings).providerInstances[instanceId],
+            created.providerInstances[instanceId],
+          );
+        }).pipe(Effect.provide(layerSettings));
+      }),
   );
 
   it.effect("pauses provider-instance mutations while a settings snapshot is in use", () =>

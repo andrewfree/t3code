@@ -170,10 +170,8 @@ function ensureProviderInstanceMutationAllowed(
   mutation: ProviderInstanceMutation,
   settingsPath: string,
 ): Effect.Effect<void, ServerSettingsError> {
-  if (
-    mutation.operation === "create" &&
-    settings.providerInstances[mutation.instanceId] !== undefined
-  ) {
+  const current = settings.providerInstances[mutation.instanceId];
+  if (mutation.operation === "create" && current !== undefined) {
     return Effect.fail(
       new ServerSettingsError({
         settingsPath,
@@ -181,6 +179,29 @@ function ensureProviderInstanceMutationAllowed(
         providerInstanceId: mutation.instanceId,
       }),
     );
+  }
+  if (mutation.operation !== "create" && mutation.expectedInstance !== undefined) {
+    let hasSecret = false;
+    if (current !== undefined) {
+      // A redacted snapshot cannot detect secret rotation. Check declared metadata without
+      // materializing credentials, and require unguarded edits for secret-bearing entries.
+      mapSettingsSecrets(
+        { ...DEFAULT_SERVER_SETTINGS, providerInstances: { [mutation.instanceId]: current } },
+        (secret) => {
+          if (secret.sensitive && (secret.redacted || secret.value.length > 0)) hasSecret = true;
+          return secret;
+        },
+      );
+    }
+    if (hasSecret || !Equal.equals(current ?? null, mutation.expectedInstance)) {
+      return Effect.fail(
+        new ServerSettingsError({
+          settingsPath,
+          operation: "check-provider-instance",
+          providerInstanceId: mutation.instanceId,
+        }),
+      );
+    }
   }
   return Effect.void;
 }

@@ -142,10 +142,14 @@ export const ProviderInstanceMutation = Schema.Union([
     operation: Schema.Literal("upsert"),
     instanceId: ProviderInstanceId,
     instance: ProviderInstanceConfig,
+    /** Compare the persisted entry before changing it; null requires absence. */
+    expectedInstance: Schema.optionalKey(Schema.NullOr(ProviderInstanceConfig)),
   }),
   Schema.Struct({
     operation: Schema.Literal("remove"),
     instanceId: ProviderInstanceId,
+    /** Compare the persisted entry before changing it; null requires absence. */
+    expectedInstance: Schema.optionalKey(Schema.NullOr(ProviderInstanceConfig)),
   }),
 ]);
 export type ProviderInstanceMutation = typeof ProviderInstanceMutation.Type;
