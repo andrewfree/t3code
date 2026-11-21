@@ -54,3 +54,33 @@ it("copies a fenced command without the fence's closing newline", async () => {
   await screen.getByRole("button", { name: "Copy code" }).click();
   await vi.waitFor(() => expect(write).toHaveBeenCalledWith("sudo pacman -S patchelf"));
 });
+
+it("repeats copy below a long block only while its header is scrolled away", async () => {
+  await ensureClientSettingsHydrated();
+  const lines = Array.from({ length: 50 }, (_, index) => `line ${index}`);
+  await using screen = await render(
+    <div data-testid="scroller" style={{ height: 200, overflow: "auto" }}>
+      <MarkdownCodeBlock
+        code={`${lines.join("\n")}\n`}
+        language="text"
+        fenceTitle={null}
+        theme="light"
+        isStreaming={false}
+      >
+        <pre>
+          <code>{lines.join("\n")}</code>
+        </pre>
+      </MarkdownCodeBlock>
+    </div>,
+    { router: false }, // The code block reads no route state.
+  );
+  const copyButtons = screen.getByRole("button", { name: "Copy code" });
+  await vi.waitFor(() => expect(copyButtons.elements()).toHaveLength(1));
+
+  const scroller = screen.getByTestId("scroller").element();
+  scroller.scrollTop = scroller.scrollHeight;
+  await vi.waitFor(() => expect(copyButtons.elements()).toHaveLength(2));
+
+  scroller.scrollTop = 0;
+  await vi.waitFor(() => expect(copyButtons.elements()).toHaveLength(1));
+});

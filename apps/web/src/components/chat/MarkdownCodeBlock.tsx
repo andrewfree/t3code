@@ -11,6 +11,7 @@ import {
   highlightCodeToHast,
 } from "../../lib/incrementalHighlighting";
 import { LRUCache } from "../../lib/lruCache";
+import { observeIntersection } from "../../lib/observeIntersection";
 import { getSyntaxHighlighterPromise } from "../../lib/syntaxHighlighting";
 import { cn } from "../../lib/utils";
 import {
@@ -40,6 +41,10 @@ const THREAD_FIND_IGNORE_PROPS = {
   "data-thread-find-ignore": "",
 } as React.HTMLAttributes<HTMLDivElement>;
 
+// A block this long can scroll its header out of view, so its wrap and copy
+// actions repeat below it whenever the header is not on screen.
+const BOTTOM_ACTIONS_MIN_LINES = 40;
+
 export function MarkdownCodeBlockFrame({
   as: Wrapper = "div",
   language,
@@ -58,13 +63,13 @@ export function MarkdownCodeBlockFrame({
   wrapped?: boolean;
   title?: React.ReactNode;
   actions?: React.ReactNode;
-  headerProps?: React.HTMLAttributes<HTMLDivElement>;
+  headerProps?: React.ComponentProps<"div">;
   children: React.ReactNode;
 }) {
   return (
     <Wrapper
       dir="ltr"
-      className="chat-markdown-codeblock my-[0.65rem] text-start overflow-hidden rounded-lg border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"
+      className="chat-markdown-codeblock relative my-[0.65rem] text-start overflow-hidden rounded-lg border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"
       data-language={language}
       data-wrap={wrapped ? "true" : "false"}
     >
@@ -184,7 +189,12 @@ export function MarkdownCodeBlock({
     // make the rendered command differ from what the terminal would receive.
     !/[\p{Cc}\p{Cf}]/u.test(code.slice(0, -1));
 
-  const handleCopy = () => copyToClipboard(code.endsWith("\n") ? code.slice(0, -1) : code);
+  const copyText = code.endsWith("\n") ? code.slice(0, -1) : code;
+  const handleCopy = () => copyToClipboard(copyText);
+  const hasBottomActions = copyText.split("\n").length >= BOTTOM_ACTIONS_MIN_LINES;
+  const [headerInView, setHeaderInView] = useState(true);
+  const observeHeader = (header: HTMLDivElement) =>
+    observeIntersection(header, (entry) => setHeaderInView(entry.isIntersecting));
 
   const copyButton = (
     <Tooltip>
@@ -205,6 +215,26 @@ export function MarkdownCodeBlock({
     </Tooltip>
   );
 
+  const wrapButton = canWrap ? (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            variant={wrapped ? "secondary" : "ghost-muted"}
+            size="icon-xs"
+            aria-pressed={wrapped}
+            onClick={() => setWrapOverride(!wrapped)}
+            aria-label={wrapLabel}
+          />
+        }
+      >
+        <WrapTextIcon className="size-3" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">{wrapLabel}</TooltipPopup>
+    </Tooltip>
+  ) : null;
+
   if (diagram) {
     return (
       <div className="my-[0.65rem] border border-transparent" data-language={language}>
@@ -223,32 +253,14 @@ export function MarkdownCodeBlock({
       fenceTitle={fenceTitle}
       theme={theme}
       wrapped={wrapped}
-      headerProps={THREAD_FIND_IGNORE_PROPS}
+      headerProps={{ ...THREAD_FIND_IGNORE_PROPS, ref: hasBottomActions ? observeHeader : null }}
       actions={
         <span
           className="flex items-center gap-0.5"
           role="toolbar"
           aria-label={gt("Code block actions")}
         >
-          {canWrap ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    type="button"
-                    variant={wrapped ? "secondary" : "ghost-muted"}
-                    size="icon-xs"
-                    aria-pressed={wrapped}
-                    onClick={() => setWrapOverride(!wrapped)}
-                    aria-label={wrapLabel}
-                  />
-                }
-              >
-                <WrapTextIcon className="size-3" />
-              </TooltipTrigger>
-              <TooltipPopup side="top">{wrapLabel}</TooltipPopup>
-            </Tooltip>
-          ) : null}
+          {wrapButton}
           {canRun ? (
             <Tooltip>
               <TooltipTrigger
@@ -275,6 +287,21 @@ export function MarkdownCodeBlock({
       }
     >
       {children}
+      {hasBottomActions ? (
+        <span
+          {...THREAD_FIND_IGNORE_PROPS}
+          role="toolbar"
+          aria-label={gt("Code block actions")}
+          // Positioned in the bottom-right corner, so showing it never changes the layout.
+          className={cn(
+            "absolute right-1.5 bottom-1.5 flex items-center gap-0.5 select-none",
+            headerInView && "invisible",
+          )}
+        >
+          {wrapButton}
+          {copyButton}
+        </span>
+      ) : null}
     </MarkdownCodeBlockFrame>
   );
 }
